@@ -18,9 +18,13 @@
 
   # 5) 检索历史相似案例
   python fill_change_reason.py search "<变更单.xls>" [--top 8]
+
+  # 6) 检查 / 安装技能更新（从 GitHub 仓库）
+  python fill_change_reason.py update [--check] [--rollback]
 """
 
 import os
+import re
 import sys
 import json
 import glob
@@ -352,19 +356,186 @@ def cmd_search(args):
 
 
 def cmd_update(args):
-    """检查 / 安装技能更新。"""
+    """检查 / 安装技能更新。
+
+    优先使用独立的 ``update.py``；若该文件不存在（旧版本），
+    则回退到本文件内置的精简实现——否则旧版本永远无法自更新，
+    陷入「要先更新才能更新」的死循环。
+    """
     try:
         import update as upd
+        if args.rollback:
+            return upd.rollback()
+        if args.check:
+            remote, local, _has = upd.do_check()
+            return 0 if remote else 2
+        return upd.do_update()
     except ImportError:
-        print("[错误] 缺少 update 模块，无法自更新。")
-        print("       可手动下载：https://github.com/lonyii/skills-gas-change-reason")
+        pass
+    return _builtin_update(args)
+
+
+# ---------------------------------------------------------------- 内置更新兜底
+# 供「尚未包含 update.py 的旧版本」自更新使用。
+# 逻辑与 update.py 一致但更精简：检查版本 → 下载 → 校验 → 逐文件覆盖 → 保留配置。
+
+def _builtin_update(args):
+    import shutil
+    import tempfile
+    import zipfile
+    try:
+        from urllib.request import Request, urlopen
+        from urllib.error import HTTPError, URLError
+    except ImportError:
+        from urllib2 import Request, urlopen, HTTPError, URLError
+
+    REPO = "lonyii/skills-gas-change-reason"
+    RAW = "https://raw.githubusercontent.com/%s/main/VERSION" % REPO
+    ZIP = "https://codeload.github.com/%s/zip/refs/heads/main" % REPO
+    UA = "gas-change-reason-skill-updater"
+
+    skill_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ver_file = os.path.join(skill_dir, "VERSION")
+    cfg_file = os.path.join(skill_dir, "scripts", "config.json")
+    backup_dir = os.path.join(os.path.dirname(skill_dir),
+                              ".%s.update_backup" % os.path.basename(skill_dir))
+
+    def local_ver():
+        try:
+            with open(ver_file, "r", encoding="utf-8") as fh:
+                return fh.read().strip() or "0.0.0"
+        except Exception:
+            return "0.0.0"
+
+    def vt(v):
+        p = re.findall(r"\d+", str(v or ""))
+        while len(p) < 3:
+            p.append("0")
+        return tuple(int(x) for x in p[:3])
+
+    print("[INFO] 本地版本: %s" % local_ver())
+    _local_ver_cached = local_ver()
+    try:
+        req = Request(RAW, headers={"User-Agent": UA})
+        with urlopen(req, timeout=20) as resp:
+            remote = resp.read().decode("utf-8", "replace").strip()
+    except Exception as e:
+        print("[ERROR] 无法读取远端版本：%s" % e)
+        print("       请手动下载：https://github.com/%s" % REPO)
         return 2
-    if args.rollback:
-        return upd.rollback()
+    print("[INFO] 远端版本: %s" % remote)
+
+    if vt(remote) <= vt(local_ver()):
+        print("[OK] 已是最新版本")
+        return 0
     if args.check:
-        remote, local, _has = upd.do_check()
-        return 0 if remote else 2
-    return upd.do_update()
+        print("[有更新] %s → %s" % (local_ver(), remote))
+        return 0
+
+    tmp = tempfile.mkdtemp(prefix="gcr_upd_")
+    try:
+        zp = os.path.join(tmp, "s.zip")
+        try:
+            req = Request(ZIP, headers={"User-Agent": UA})
+            with urlopen(req, timeout=120) as resp, open(zp, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+        except Exception as e:
+            print("[ERROR] 下载失败：%s" % e)
+            return 2
+        new_dir = os.path.join(tmp, "new")
+        os.makedirs(new_dir, exist_ok=True)
+        try:
+            with zipfile.ZipFile(zp) as z:
+                names = [n for n in z.namelist() if n and not n.startswith("__MACOSX")]
+                root = set(n.split("/")[0] for n in names).pop()
+                for n in names:
+                    rel = n[len(root):].lstrip("/")
+                    if not rel:
+                        continue
+                    dest = os.path.join(new_dir, rel.replace("/", os.sep))
+                    if n.endswith("/"):
+                        if not os.path.isdir(dest):
+                            os.makedirs(dest)
+                        continue
+                    d = os.path.dirname(dest)
+                    if d and not os.path.isdir(d):
+                        os.makedirs(d)
+                    with z.open(n) as s, open(dest, "wb") as o:
+                        shutil.copyfileobj(s, o)
+        except Exception as e:
+            print("[ERROR] 解压失败：%s" % e)
+            return 2
+
+        # 校验必需文件
+        for must in ("SKILL.md", "scripts/gas_change_core.py",
+                     "scripts/material_reason.py", "scripts/fill_change_reason.py"):
+            if not os.path.exists(os.path.join(new_dir, must.replace("/", os.sep))):
+                print("[ERROR] 新版本缺少必需文件 %s，更新中止" % must)
+                return 2
+        print("[OK] 新版本校验通过")
+
+        # 备份旧版（逐文件复制，避免 Windows 目录占用）
+        cfg = None
+        if os.path.exists(cfg_file):
+            try:
+                import json as _json
+                with open(cfg_file, "r", encoding="utf-8") as fh:
+                    cfg = _json.load(fh)
+            except Exception:
+                cfg = None
+        try:
+            if os.path.isdir(backup_dir):
+                shutil.rmtree(backup_dir, ignore_errors=True)
+            for r, ds, fs in os.walk(skill_dir):
+                ds[:] = [d for d in ds if d != "__pycache__"]
+                rel = os.path.relpath(r, skill_dir)
+                td = backup_dir if rel == "." else os.path.join(backup_dir, rel)
+                if not os.path.isdir(td):
+                    os.makedirs(td)
+                for f in fs:
+                    if f == "config.json" or f.endswith((".pyc", ".pyo")):
+                        continue
+                    try:
+                        shutil.copy2(os.path.join(r, f), os.path.join(td, f))
+                    except Exception:
+                        pass
+        except Exception as e:
+            print("[ERROR] 备份失败：%s" % e)
+            return 2
+
+        # 逐文件覆盖
+        for r, ds, fs in os.walk(new_dir):
+            ds[:] = [d for d in ds if d != "__pycache__"]
+            for f in fs:
+                if f == "config.json" or f.endswith((".pyc", ".pyo")):
+                    continue
+                src = os.path.join(r, f)
+                dst = os.path.join(skill_dir, os.path.relpath(src, new_dir))
+                d = os.path.dirname(dst)
+                if d and not os.path.isdir(d):
+                    os.makedirs(d)
+                try:
+                    shutil.copy2(src, dst)
+                except Exception:
+                    try:
+                        if os.path.exists(dst):
+                            os.remove(dst)
+                        shutil.copy2(src, dst)
+                    except Exception as e:
+                        print("[ERROR] 覆盖失败 %s：%s" % (f, e))
+                        return 1
+        if cfg:
+            try:
+                with open(cfg_file, "w", encoding="utf-8") as fh:
+                    import json as _json
+                    _json.dump(cfg, fh, ensure_ascii=False, indent=2)
+                print("[OK] 已保留本地归档目录配置")
+            except Exception:
+                pass
+        print("[OK] 更新完成：%s → %s" % (_local_ver_cached, remote))
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main():

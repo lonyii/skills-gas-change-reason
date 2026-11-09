@@ -224,28 +224,99 @@ def _read_config():
     return None
 
 
+def _copy_over(src, dst):
+    """覆盖式复制。
+
+    优先直接覆盖（Windows 上 Python 不会持有已加载的 .py 文件句柄，
+    直接覆盖通常可行）；若因占用失败，再尝试「删除后复制」。
+    """
+    try:
+        shutil.copy2(src, dst)
+        return
+    except (OSError, IOError):
+        pass
+    try:
+        if os.path.exists(dst):
+            os.remove(dst)
+    except OSError:
+        pass
+    shutil.copy2(src, dst)
+
+
+def _copy_tree(src_root, dst_root):
+    """逐文件复制目录树。
+
+    不用 ``shutil.copytree``——它会打开各级子目录做遍历，
+    在 Windows 上遇到被占用的目录会抛 ``[WinError 32]``。
+    本函数只读文件内容、不打开目录句柄，因此对目录占用免疫。
+    """
+    for root, dirs, files in os.walk(src_root):
+        dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+        rel = os.path.relpath(root, src_root)
+        target_dir = dst_root if rel == "." else os.path.join(dst_root, rel)
+        if not os.path.isdir(target_dir):
+            os.makedirs(target_dir)
+        for f in files:
+            if f in IGNORE_FILES or os.path.splitext(f)[1] in (".pyc", ".pyo"):
+                continue
+            _copy_over(os.path.join(root, f), os.path.join(target_dir, f))
+
+
 def apply_update(new_dir):
     """用 new_dir 的内容替换当前技能目录。
 
-    先把旧目录移到 .update_backup，成功后删除备份；失败则回滚。
+    逐文件覆盖（而不是整体移动目录）——Windows 上若当前工作目录就在技能目录内
+    （同事习惯 `cd scripts` 后执行 update），移动整个目录会因文件被占用而失败：
+    `[WinError 32] 另一个程序正在使用此文件`。逐文件覆盖只替换内容，
+    不触碰目录本身，因此不受占用影响。
+
+    替换前把旧文件复制到备份目录，失败则从备份还原。
     返回 True 表示成功。
     """
-    # 1) 备份配置
     cfg = _read_config()
-    # 2) 备份旧目录
-    if os.path.isdir(BACKUP_DIR):
-        shutil.rmtree(BACKUP_DIR, ignore_errors=True)
-    parent = os.path.dirname(SKILL_DIR)
+    backup = None
     try:
+        # 1) 备份旧版本——逐文件复制，不用 copytree。
+        #    copytree 也会打开目录做遍历，遇到被占用的子目录同样会报
+        #    [WinError 32]；逐文件复制只读文件内容，不受目录占用影响。
+        if os.path.isdir(BACKUP_DIR):
+            shutil.rmtree(BACKUP_DIR, ignore_errors=True)
         if os.path.isdir(SKILL_DIR):
-            shutil.move(SKILL_DIR, BACKUP_DIR)
+            backup = BACKUP_DIR
+            _copy_tree(SKILL_DIR, backup)
     except Exception as e:
         _err("备份旧版本失败：%s" % e)
         return False
+
     try:
-        # 3) 复制新版本
-        shutil.copytree(new_dir, SKILL_DIR,
-                        ignore=shutil.ignore_patterns(*IGNORE_DIRS, *IGNORE_FILES))
+        # 2) 覆盖文件
+        for root, dirs, files in os.walk(new_dir):
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            for f in files:
+                if os.path.splitext(f)[1] in (".pyc", ".pyo") or f in IGNORE_FILES:
+                    continue
+                src = os.path.join(root, f)
+                rel = os.path.relpath(src, new_dir)
+                dst = os.path.join(SKILL_DIR, rel)
+                d = os.path.dirname(dst)
+                if d and not os.path.isdir(d):
+                    os.makedirs(d)
+                _copy_over(src, dst)
+
+        # 3) 清理新版本中已不存在的旧文件（保留 config.json）
+        for root, dirs, files in os.walk(SKILL_DIR):
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            for f in files:
+                if f in IGNORE_FILES or os.path.splitext(f)[1] in (".pyc", ".pyo"):
+                    continue
+                full = os.path.join(root, f)
+                rel = os.path.relpath(full, SKILL_DIR)
+                if not os.path.exists(os.path.join(new_dir, rel)):
+                    try:
+                        os.remove(full)
+                    except OSError:
+                        pass
+
         # 4) 恢复配置
         if cfg:
             cfg_path = os.path.join(SKILL_DIR, "scripts", "config.json")
@@ -258,33 +329,49 @@ def apply_update(new_dir):
         return True
     except Exception as e:
         _err("替换失败：%s" % e)
-        # 回滚
+        # 回滚：从备份逐文件还原
         try:
-            if os.path.isdir(SKILL_DIR):
-                shutil.rmtree(SKILL_DIR, ignore_errors=True)
-            if os.path.isdir(BACKUP_DIR):
-                shutil.move(BACKUP_DIR, SKILL_DIR)
-            _ok("已回滚到原版本")
+            if backup and os.path.isdir(backup):
+                for root, dirs, files in os.walk(backup):
+                    dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+                    for f in files:
+                        if f in IGNORE_FILES or os.path.splitext(f)[1] in (".pyc", ".pyo"):
+                            continue
+                        src = os.path.join(root, f)
+                        dst = os.path.join(SKILL_DIR, os.path.relpath(src, backup))
+                        d = os.path.dirname(dst)
+                        if d and not os.path.isdir(d):
+                            os.makedirs(d)
+                        _copy_over(src, dst)
+                _ok("已回滚到原版本")
         except Exception as e2:
             _err("回滚也失败：%s" % e2)
         return False
 
 
 def rollback():
-    """回滚到 .update_backup 中的旧版本。"""
+    """回滚到备份目录中的旧版本。
+
+    同样采用逐文件覆盖——移动整个目录在 Windows 上会因文件被占用而失败。
+    """
     if not os.path.isdir(BACKUP_DIR):
-        _warn("没有可回滚的备份（.update_backup 不存在）")
+        _warn("没有可回滚的备份（%s 不存在）" % BACKUP_DIR)
         return 1
     cfg = _read_config()
-    tmp_old = os.path.join(tempfile.gettempdir(), "gcr_rollback_%d" % os.getpid())
     try:
-        shutil.move(SKILL_DIR, tmp_old)
-        shutil.move(BACKUP_DIR, SKILL_DIR)
+        for root, dirs, files in os.walk(BACKUP_DIR):
+            dirs[:] = [d for d in dirs if d not in IGNORE_DIRS]
+            for f in files:
+                if f in IGNORE_FILES or os.path.splitext(f)[1] in (".pyc", ".pyo"):
+                    continue
+                src = os.path.join(root, f)
+                dst = os.path.join(SKILL_DIR, os.path.relpath(src, BACKUP_DIR))
+                d = os.path.dirname(dst)
+                if d and not os.path.isdir(d):
+                    os.makedirs(d)
+                _copy_over(src, dst)
     except Exception as e:
         _err("回滚失败：%s" % e)
-        # 尽量恢复原状
-        if os.path.isdir(tmp_old) and not os.path.isdir(SKILL_DIR):
-            shutil.move(tmp_old, SKILL_DIR)
         return 1
     if cfg:
         try:
@@ -293,7 +380,6 @@ def rollback():
                 json.dump(cfg, fh, ensure_ascii=False, indent=2)
         except Exception:
             pass
-    shutil.rmtree(tmp_old, ignore_errors=True)
     _ok("已回滚到上一个版本")
     return 0
 
