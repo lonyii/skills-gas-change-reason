@@ -1,0 +1,15 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 本地配置（含各自的归档目录路径，不应提交）
+scripts/config.json
+
+# 自动更新备份
+.update_backup/
+.*.update_backup/
+
+# 系统文件
+.DS_Store
+Thumbs.db
