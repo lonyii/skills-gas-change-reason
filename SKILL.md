@@ -1,15 +1,22 @@
 ---
 name: gas-change-reason
-version: 1.0.0
+version: 1.1.0
 display_name: 燃气工程变更原因生成
 description: "为南昌燃气工程设计变更单自动生成『变更原因』文案。当用户给出一份只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表的两个 [变更原因] 单元格（申请单 B5 + 工程量变更单 A49）。"
 agent_created: true
+homepage: https://github.com/lonyii/skills-gas-change-reason
+repository: https://github.com/lonyii/skills-gas-change-reason
 ---
 
 # 燃气工程变更原因生成
 
-> **首次安装：把 `gas-change-reason.zip` 交给你的 AI，说一句「帮我安装这个技能包」即可自动装好（依赖安装、路径配置、自检校验全部自动完成）；之后每次把变更单发给它，说「帮我填写这份变更单的变更原因」即可。**
+> **首次安装（二选一）**：
+> ① 把 `gas-change-reason.zip` 交给你的 AI，说一句「帮我安装这个技能包」；
+> ② 只给仓库地址 `https://github.com/lonyii/skills-gas-change-reason`，让 AI 从 GitHub 拉取安装。
+> 之后每次把变更单发给它，说「帮我填写这份变更单的变更原因」即可。
 
+> 📦 仓库：<https://github.com/lonyii/skills-gas-change-reason> ｜ 版本：见 `VERSION` 文件
+> 🔄 自动更新：`python scripts/fill_change_reason.py update`（检查：`update --check`）
 > 语料来源：`E:\2024\2024结算相关\1.材料平差\设计变更\hk`（136 份历史设计变更单）
 > 能力：**Applier 型**——输入变更单 → 输出并写入规范化的变更原因
 
@@ -56,6 +63,73 @@ python scripts/fill_change_reason.py search "<变更单.xls>" --top 8
 > **归档目录**：默认 `E:\2024\2024结算相关\1.材料平差\设计变更\hk`。
 > 换机器时用 `--archive <路径>`、环境变量 `GAS_CHANGE_ARCHIVE` 或
 > `scripts/config.json` 的 `archive_root` 覆盖，之后运行 `reindex` 重建语料。
+
+## 版本与自动更新
+
+仓库：<https://github.com/lonyii/skills-gas-change-reason>（公开，匿名可拉取）
+
+```bash
+# 检查是否有新版本（不改动任何文件）
+python scripts/fill_change_reason.py update --check
+
+# 更新到最新版
+python scripts/fill_change_reason.py update
+
+# 更新出问题可回滚到上一个版本
+python scripts/fill_change_reason.py update --rollback
+```
+
+### 版本号规则
+
+- 版本号写在仓库根的 **`VERSION`** 文件（纯文本一行，如 `1.1.0`）
+- 同时同步在 `SKILL.md` 的 frontmatter `version:` 字段
+- 两处必须一致；`update.py` 优先读 `VERSION`，读不到时回退读 frontmatter
+
+### 更新机制
+
+`scripts/update.py` 的行为：
+
+1. 读 `https://raw.githubusercontent.com/lonyii/skills-gas-change-reason/main/VERSION` 取远端版本
+2. 与本地版本比较（按数字分段比，`1.0.10 > 1.0.9`，不做字符串比较）
+3. 有新版则从 `codeload.github.com` 下载仓库快照 zip
+4. 解压到临时目录 → **校验必需文件齐全**（SKILL.md + 4 个核心脚本）
+5. 把旧目录移到备份目录 → 复制新版本 → **恢复本地 `config.json`**
+6. 替换失败自动回滚到旧目录
+
+**关键保证**：
+- **保留本地配置** —— `scripts/config.json` 记录同事自己的归档目录路径，升级不会丢
+- **原子替换 + 自动回滚** —— 不会把技能装坏
+- **幂等** —— 已是最新版本时不做任何写入
+- **不需要 GitHub Token** —— 走匿名 HTTPS
+- **不覆盖语料缓存** —— `corpus_cache.json` 随版本一起更新，但同事本地
+  `reindex` 重建的语料在 `config.json` 指向的归档目录上，不受影响
+
+> ⚠️ **备份目录必须放在技能目录之外**。
+> 早期版本把备份放在 `<skill>/.update_backup/`，导致「把技能目录移进备份目录」
+> 变成「把目录移进它自己的子目录」，Windows 直接报
+> `Cannot move a directory into itself`。现改为同级父目录下的
+> `.<技能名>.update_backup/`。
+
+### 首次安装（从 GitHub）
+
+若手上只有仓库地址、没有 zip：
+
+```bash
+python scripts/install.py --from-github
+```
+
+该参数会先从 GitHub 下载源码再安装，其余流程（依赖安装、归档探测、自检）与本地安装一致。
+
+### 给 AI 的更新指令
+
+用户说「更新一下变更原因技能」时：
+
+```bash
+cd <安装路径>/scripts
+python fill_change_reason.py update
+```
+
+更新完成后建议跑一次 `doctor` 确认环境；若新版本涉及语料更新，可再跑 `reindex`。
 
 ## 变更单结构（必须知道）
 
@@ -169,7 +243,7 @@ python scripts/fill_change_reason.py search "<变更单.xls>" --top 8
 | `protect` 埋深防护 | 出现保护沟 | 部分管段埋深不够，根据公司相关要求需敷设保护沟_dn110-5m |
 | `anti_impact` 防撞护栏 | 出现防撞/护栏 | 该处车辆进出频繁，为保证燃气管道安全，自制防撞护栏 |
 | `support_swap` 支架替代 | 固定/落地/吊架 ↔ 导向支架 | 因物资供应部不再提供固定支架_DN50，需改用导向支架_DN50代替 |
-| `tap_change` 碰接/接入口变更 | 鞍型电熔变径三通增减，或 PE管 ↔ 钢塑转换/镀锌管/焊接法兰 | 原鞍型电熔管件_BFPE200改为鞍型电熔变径三通_BFPE200/160碰接 |
+| `tap_change` 碰接/接入口变更 | ① 鞍型电熔件增减；② **减鞍型件 + 增常规熔接件**（不停输改停气）；③ PE管 ↔ 钢塑转换/镀锌管/焊接法兰 | 取消鞍型电熔管件_BFPE110-2个不停输碰接，改为电熔弯头_dn63_90°-1个常规熔接碰接 |
 | `route_change` 路径改道 | 定向钻段增减，或埋地管长大幅重排(≥20m 且差≥15m) | 原敷设路径无法实施，经报告公司相关代表到现场核实并商议后决定改道 |
 
 ### 长度自适应（对齐历史分布）
@@ -243,7 +317,7 @@ python scripts/fill_change_reason.py search "<变更单.xls>" --top 8
 | **材料区会读到签字栏** | 材料提取必须以 A 列出现「变更预算」为结束标志，否则会把「预算人员(签字)」当成材料 |
 | **xlrd 需 `formatting_info=True`** | 否则读不到 `merged_cells` |
 | **MCP 通道打不开 .xls** | sheetagent 的 `resolve_local_excel` 对本机 D 盘路径会丢盘符，且老格式解析失败——本技能统一走 Python |
-| **写前安全校验** | 目标单元格若已有非占位符内容，脚本**拒绝写入**并报错，防止误覆盖 |
+| **写前安全校验** | 目标单元格若已有非占位符内容，**自动生成模式直接中止**并报错；只有显式 `--body` 才授权覆盖 |
 | **不生成备份** | 写入直接覆盖原文件，不留 `.备份.xls` 副本；覆盖前会在 stderr 打印告警 |
 
 ## 工作流程
@@ -277,9 +351,19 @@ python scripts/fill_change_reason.py fill "<变更单.xls>" --body "<润色后�
 5. **相关历史案例**（含"关联理由"：材料相似 / 同类工程 / 关键词命中）
 6. **文风规范**（含新语料补充的句式，从 314 份语料归纳）
 
-> **安全策略**：自动生成时若目标格已有内容会中止（防盲目覆盖）；
-> 显式用 `--body` 指定正文时允许覆盖（这正是 AI 润色回写的路径）。
+> **安全策略（三条路径，行为各不相同）**：
+>
+> | 场景 | 命令 | 行为 |
+> |---|---|---|
+> | 目标格为空 | `fill` | 自动生成并写入 |
+> | 目标格已有内容 | `fill`（无 `--body`） | **中止**并提示改走 polish 流程 |
+> | 目标格已有内容 | `polish` → `fill --body "<润色结果>"` | 授权覆盖，stderr 打印告警 |
+>
 > **写入直接覆盖原文件，不生成备份副本**；覆盖时会在 stderr 打印告警，提示原内容将永久替换。
+>
+> ⚠️ 这条中止规则依赖 `fill_reason(..., overwrite=...)` 的显式标志，
+> 不能改回「按是否传了文本来判断」——CLI 的自动生成路径**始终**会传文本，
+> 那样判断会永远为真，保护形同虚设。
 
 ## 参考文档
 
@@ -292,11 +376,14 @@ python scripts/fill_change_reason.py fill "<变更单.xls>" --body "<润色后�
 |---|---|
 | `SKILL.md` | 本文件：结构规律、方法论、实现坑位 |
 | `README.md` | **面向同事的安装与使用说明**（含「给 AI 的安装步骤」，可独立分发） |
-| `scripts/install.py` | **一键安装**：依赖安装 + 复制到 skills 目录 + 配置归档 + 自检 |
+| `VERSION` | 版本号（更新时由本仓库维护，客户端据此判断是否有新版） |
+| `CHANGELOG.md` | 更新日志（每次版本的可感知变化） |
+| `scripts/install.py` | **一键安装**：依赖安装 + 复制到 skills 目录 + 配置归档 + 自检（`--from-github` 支持从仓库直接装） |
+| `scripts/update.py` | **自动更新**：检查远端版本 → 下载 → 校验 → 原子替换 → 保留本地配置 → 失败自动回滚 |
 | `scripts/gas_change_core.py` | 变更单读写（xlrd 读 / Excel COM 写）+ 语料库 |
 | `scripts/material_reason.py` | **材料级推理引擎**（核心：材料 → 工程动作） |
 | `scripts/project_code.py` | **工程编号分类映射**（《分类、编码及命名指引》附表1） |
-| `scripts/fill_change_reason.py` | CLI：doctor / analyze / fill / search / reindex |
+| `scripts/fill_change_reason.py` | CLI：doctor / analyze / fill / polish / search / reindex / update |
 | `scripts/corpus_cache.json` | 314 份语料缓存 |
 | `scripts/config.example.json` | 归档目录配置模板（复制为 config.json 使用） |
 | `references/patterns.md` | 310 份原因原文，按因子归类 |
