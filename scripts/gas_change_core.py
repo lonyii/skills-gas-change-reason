@@ -23,6 +23,7 @@ import glob
 import json
 import shutil
 import tempfile
+import time
 
 try:
     import xlrd
@@ -159,6 +160,15 @@ def _clean(text):
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def _norm_name(name):
+    """工程名称归一化（用于识别「同一个工程」）：去括号后缀、空格、标点。"""
+    s = _clean(name)
+    s = re.sub(r"[（(][^）)]*[）)]", "", s)
+    s = re.sub(r"[\s\-—_、，,·．.]+", "", s)
+    s = re.sub(r"(工程|项目)$", "", s)
+    return s
+
+
 # ---------------------------------------------------------------- 变更单读取
 
 class ChangeOrder(object):
@@ -172,8 +182,10 @@ class ChangeOrder(object):
         self.path = os.path.abspath(path)
         self.name = os.path.basename(self.path)
         self._wb = None
+        self._print_sheets = None
         self._print_sheet = None
-        self._merged = None
+        self._merged_cache = {}
+        self._orders = None
 
     # -- 基础访问 ------------------------------------------------------
 
@@ -194,132 +206,232 @@ class ChangeOrder(object):
             return None
 
     @property
+    def print_sheets(self):
+        """全部可作为变更单打印的工作表（排除作废/旧版）。
+
+        一个工作簿常有多张 '*变更单打印' 表（如「（地下）」「（地上）」各一张），
+        每张表内还可能纵向排列多张变更单。
+        """
+        if self._print_sheets is None:
+            self._print_sheets = [
+                s for s in self.workbook.sheets()
+                if PRINT_SHEET_KEY in s.name and "作废" not in s.name and "旧版" not in s.name
+            ]
+        return self._print_sheets
+
+    @property
     def print_sheet(self):
-        """定位 '*-变更单打印' 工作表（排除作废/旧版）。"""
+        """第一张 '*变更单打印' 表（兼容旧接口）。"""
         if self._print_sheet is not None:
             return self._print_sheet
-        cands = [s for s in self.workbook.sheets()
-                 if PRINT_SHEET_KEY in s.name and "作废" not in s.name and "旧版" not in s.name]
-        self._print_sheet = cands[0] if cands else None
+        self._print_sheet = self.print_sheets[0] if self.print_sheets else None
         return self._print_sheet
+
+    def merged_for(self, sh):
+        """取某张表的合并区（xlrd 的 merged_cells 未按行排序，勿依赖顺序）。"""
+        if sh is None:
+            return []
+        cached = self._merged_cache.get(sh.name)
+        if cached is None:
+            cached = list(getattr(sh, "merged_cells", []) or [])
+            self._merged_cache[sh.name] = cached
+        return cached
 
     @property
     def merged(self):
-        if self._merged is None:
-            self._merged = self.workbook.sheet_by_name(self.print_sheet.name).merged_cells \
-                if self.print_sheet else []
-        return self._merged
+        return self.merged_for(self.print_sheet)
 
     # -- 字段提取 ------------------------------------------------------
 
-    def header(self):
-        """返回 (工程编号, 工程名称)。"""
-        sh = self.print_sheet
-        if sh is None:
-            return "", ""
-        for r in range(min(10, sh.nrows)):
-            if _clean(sh.cell_value(r, 0)) == "工程编号":
-                return (_clean(sh.cell_value(r, 2)), _clean(sh.cell_value(r, 7)))
-        return "", ""
+    def orders(self):
+        """枚举本工作簿中的全部变更单（多 sheet / 同 sheet 多张）。
 
-    def _section_materials(self, sh, label_col, name_col, qty_col):
-        """读取『增加材料:』/『减少材料:』区块。
-
-        label_col/name_col/qty_col 分别为标签列、材料名列、数量列。
-        以 A 列出现『变更预算』作为区块结束标志，避免把签字栏
-        （预算人员/施工单位/监理单位…）误读成材料。
+        一张变更单 = 「设计变更申请单」+「工程量变更单」两个单据。
+        版式特征：
+          · 申请单：A 列「工程编号」→「设计变更原因」→ 材料区 →「变更预算」
+          · 工程量单：A 列「工程量变更单」标题 →「工程编号」→ 整行合并的原因区
+        同一 sheet 内出现多个「设计变更原因」即为多张变更单（模板默认 4 组）。
         """
+        if self._orders is not None:
+            return self._orders
         out = []
-        label = None
-        for r in range(8, min(40, sh.nrows)):
-            cell = _clean(sh.cell_value(r, label_col))
-            if cell in ("增加材料:", "增加材料："):
-                label = "add"
-                continue
-            if cell in ("减少材料:", "减少材料："):
-                label = "red"
-                continue
-            if label is None:
-                continue
-            # 表格下方的签字栏不是材料
-            col_a = _clean(sh.cell_value(r, 0))
-            if col_a.startswith(("变更预算", "施工单位", "监理单位", "变更内容")):
-                break
-            nm = _clean(sh.cell_value(r, name_col))
-            if not nm:
-                continue
-            if nm.startswith(("变更预算", "施工单位", "监理单位", "变更内容",
-                              "预算人员", "日 期", "签 章")):
-                break
-            out.append({"name": nm, "qty": _clean(sh.cell_value(r, qty_col)),
-                        "norm": _norm(nm)})
+        for sh in self.print_sheets:
+            anchors = [r for r in range(sh.nrows)
+                       if _clean(sh.cell_value(r, 0)) == "设计变更原因"]
+            if anchors:
+                bounds = [(anchors[i], anchors[i + 1] if i + 1 < len(anchors) else sh.nrows)
+                          for i in range(len(anchors))]
+            else:
+                # 老版式可能只有工程量变更单，没有申请单
+                title = next((r for r in range(sh.nrows)
+                              if "工程量变更单" in _clean(sh.cell_value(r, 0))), None)
+                bounds = [(None, sh.nrows)] if title is not None else []
+            for i, (start, end) in enumerate(bounds):
+                order = self._order_at(sh, start, end, len(out) + 1, i + 1)
+                if order:
+                    out.append(order)
+        self._orders = out
         return out
 
-    def materials(self):
-        """返回 (增加材料 list, 减少材料 list)。"""
-        sh = self.print_sheet
-        if sh is None:
-            return [], []
-        add = self._section_materials(sh, 0, 0, 6)
-        red = self._section_materials(sh, 7, 7, 13)
+    def _order_at(self, sh, app_row, end_row, seq, index):
+        """提取单张变更单：原因格位置、编号名称、增减材料、现状。"""
+        merged = self.merged_for(sh)
+        qty_title = None
+        for r in range(0 if app_row is None else app_row + 1,
+                       min(end_row, sh.nrows)):
+            if "工程量变更单" in _clean(sh.cell_value(r, 0)):
+                qty_title = r
+                break
+
+        # 申请单原因格：B 列起的合并区
+        app_slot = None
+        if app_row is not None:
+            for (rlo, rhi, clo, chi) in merged:
+                if rlo == app_row and clo == 1:
+                    app_slot = (sh.name, rlo, clo)
+                    break
+            if app_slot is None:
+                app_slot = (sh.name, app_row, 1)
+
+        # 工程量单原因格：标题行之下、行号最小的整行合并区
+        # （xlrd 的 merged_cells 未按行排序，必须取 min(rlo)）
+        qty_slot = None
+        if qty_title is not None:
+            cands = [(rlo, clo) for (rlo, rhi, clo, chi) in merged
+                     if clo == 0 and chi >= 5 and qty_title < rlo < end_row]
+            if cands:
+                rlo, clo = min(cands)
+                qty_slot = (sh.name, rlo, clo)
+
+        header_row, code, name = self._order_header(sh, app_row, qty_title)
+        if app_row is None and qty_title is None:
+            return None
+
+        mat_start = header_row if header_row is not None else (app_row or qty_title or 0)
+        mat_end = qty_title if qty_title is not None else end_row
+        add, red = self._order_materials(sh, mat_start, mat_end)
+
+        app_val = _clean(sh.cell_value(app_slot[1], app_slot[2])) if app_slot else ""
+        qty_val = _clean(sh.cell_value(qty_slot[1], qty_slot[2])) if qty_slot else ""
+        has_draft = bool((app_val and app_val != PLACEHOLDER)
+                         or (qty_val and qty_val != PLACEHOLDER))
+        return {
+            "sheet": sh.name,
+            "index": index,
+            "seq": seq,
+            "code": code,
+            "name": name,
+            "header_row": header_row,
+            "app_slot": app_slot,
+            "qty_slot": qty_slot,
+            "app_addr": _addr(app_slot[1], app_slot[2]) if app_slot else "",
+            "qty_addr": _addr(qty_slot[1], qty_slot[2]) if qty_slot else "",
+            "add": add,
+            "red": red,
+            "draft_app": app_val,
+            "draft_qty": qty_val,
+            "has_draft": has_draft,
+            "needs_fill": not has_draft,
+        }
+
+    def _order_header(self, sh, app_row, qty_title):
+        """该单据的 (工程编号所在行, 工程编号, 工程名称)。
+
+        「工程编号」紧邻「设计变更原因」上方；同 sheet 多张单据时，
+        向上扫描遇到上一张单据的「设计变更原因」即停，避免取到别人的编号。
+        """
+        start = app_row if app_row is not None else (qty_title or 0)
+        r = start
+        while r >= 0 and start - r <= 30:
+            a = _clean(sh.cell_value(r, 0))
+            if a == "工程编号":
+                return r, _clean(sh.cell_value(r, 2)), _clean(sh.cell_value(r, 7))
+            if a == "设计变更原因" and r != app_row:
+                break
+            r -= 1
+        for r in range(start, min(sh.nrows, start + 30)):
+            if _clean(sh.cell_value(r, 0)) == "工程编号":
+                return r, _clean(sh.cell_value(r, 2)), _clean(sh.cell_value(r, 7))
+        return None, "", ""
+
+    def _order_materials(self, sh, start_row, end_row):
+        """读取该单据的增/减材料。
+
+        关键：**不能按列判定增/减**。有的模板把「减少材料」标签放在 A 列、
+        「增加材料」放在 H 列，也有 A 列整块只有「减少材料」的。必须按标签
+        单元格的实际文本决定该侧归属，否则会把减少项误读成增加项。
+        """
+        add, red = [], []
+        side = {0: None, 7: None}
+        for r in range(max(0, start_row), min(end_row, sh.nrows)):
+            a = _clean(sh.cell_value(r, 0))
+            h = _clean(sh.cell_value(r, 7))
+            for col, txt in ((0, a), (7, h)):
+                t = txt.replace("：", ":")
+                if t == "增加材料:":
+                    side[col] = "add"
+                elif t == "减少材料:":
+                    side[col] = "red"
+            if a.startswith(("变更预算", "施工单位", "监理单位")):
+                break
+            for col in (0, 7):
+                if side[col] is None:
+                    continue
+                nm = _clean(sh.cell_value(r, col))
+                if not nm or nm.replace("：", ":") in ("增加材料:", "减少材料:"):
+                    continue
+                if nm.startswith(("变更预算", "施工单位", "监理单位",
+                                  "预算人员", "日 期", "签 章")):
+                    continue
+                item = {"name": nm,
+                        "qty": _clean(sh.cell_value(r, 6 if col == 0 else 13)),
+                        "norm": _norm(nm)}
+                (add if side[col] == "add" else red).append(item)
         return add, red
 
+    # -- 兼容旧接口：全部指向第一张变更单 --------------------------------
+
+    def _first_order(self):
+        orders = self.orders()
+        return orders[0] if orders else None
+
+    def header(self):
+        """返回 (工程编号, 工程名称) —— 第一张变更单。"""
+        o = self._first_order()
+        return (o["code"], o["name"]) if o else ("", "")
+
+    def materials(self):
+        """返回 (增加材料 list, 减少材料 list) —— 第一张变更单。"""
+        o = self._first_order()
+        return (o["add"], o["red"]) if o else ([], [])
+
     def reason_slots(self):
-        """定位变更原因的写入位置。
+        """第一张变更单的原因格位置。
 
         返回 dict:
           app : (sheet_name, row, col)  申请单「设计变更原因」右侧合并区左上角
           qty : (sheet_name, row, col)  工程量变更单「[变更原因]」合并区左上角
         """
-        sh = self.print_sheet
-        if sh is None:
-            return {}
+        o = self._first_order()
         out = {}
-        # 申请单：A 列 = '设计变更原因'，取值右侧合并区（B5 起）
-        for r in range(min(12, sh.nrows)):
-            if _clean(sh.cell_value(r, 0)) == "设计变更原因":
-                for (rlo, rhi, clo, chi) in self.merged:
-                    if rlo == r and clo == 1:
-                        out["app"] = (sh.name, rlo, clo)
-                        break
-                else:
-                    out["app"] = (sh.name, r, 1)
-                break
-        # 工程量变更单：定位「工程量变更单」标题行之下、行号最小的整行合并区
-        # （xlrd 的 merged_cells 未按行排序，不能依赖遍历顺序，必须取 min(rlo)）
-        title_r = None
-        for r in range(sh.nrows):
-            if "工程量变更单" in _clean(sh.cell_value(r, 0)):
-                title_r = r
-                break
-        cands = []
-        for (rlo, rhi, clo, chi) in self.merged:
-            if clo == 0 and chi >= 5 and (title_r is None or rlo > title_r):
-                cands.append((rlo, clo))
-        if cands:
-            rlo, clo = min(cands)          # 标题之下第一个整行合并区 = [变更原因]
-            out["qty"] = (sh.name, rlo, clo)
+        if o:
+            if o["app_slot"]:
+                out["app"] = o["app_slot"]
+            if o["qty_slot"]:
+                out["qty"] = o["qty_slot"]
         return out
 
     def current_reason(self):
-        """读取已有变更原因（申请单侧），返回文本；无则空串。"""
-        sh = self.print_sheet
-        if sh is None:
-            return ""
-        for r in range(min(12, sh.nrows)):
-            if _clean(sh.cell_value(r, 0)) == "设计变更原因":
-                for c in range(1, sh.ncols):
-                    v = _clean(sh.cell_value(r, c))
-                    if v:
-                        return v
-        return ""
+        """读取第一张变更单已有原因（申请单侧）；无则空串。"""
+        o = self._first_order()
+        return o["draft_app"] if o else ""
 
-    def needs_fill(self):
+    def needs_fill(self, order=None):
         """True 表示变更原因尚未填写。"""
-        cur = self.current_reason()
-        return (not cur) or cur == PLACEHOLDER
+        o = order if isinstance(order, dict) else self._first_order()
+        return bool(o["needs_fill"]) if o else True
 
-    def read_draft(self):
+    def read_draft(self, order=None):
         """读取两处变更原因单元格的现有内容（用户草稿）。
 
         返回 dict:
@@ -328,24 +440,12 @@ class ChangeOrder(object):
           app_addr / qty_addr : 对应 A1 地址
           has_draft : 是否存在可作为提示词的草稿
         """
-        out = {"app": "", "qty": "", "app_addr": "", "qty_addr": "", "has_draft": False}
-        slots = self.reason_slots()
-        sh = self.print_sheet
-        if sh is None:
-            return out
-        for key in ("app", "qty"):
-            if key not in slots:
-                continue
-            _, r, c = slots[key]
-            val = _clean(sh.cell_value(r, c))
-            addr = _addr(r, c)
-            if key == "app":
-                out["app"], out["app_addr"] = val, addr
-            else:
-                out["qty"], out["qty_addr"] = val, addr
-            if val and val != PLACEHOLDER:
-                out["has_draft"] = True
-        return out
+        o = order if isinstance(order, dict) else self._first_order()
+        if not o:
+            return {"app": "", "qty": "", "app_addr": "", "qty_addr": "", "has_draft": False}
+        return {"app": o["draft_app"], "qty": o["draft_qty"],
+                "app_addr": o["app_addr"], "qty_addr": o["qty_addr"],
+                "has_draft": o["has_draft"]}
 
 
 # ---------------------------------------------------------------- 历史语料
@@ -390,6 +490,12 @@ class Corpus(object):
                 continue
             for f in sorted(glob.glob(os.path.join(root, "**", "*.xls"), recursive=True)):
                 if ".workbuddy" in f:
+                    continue
+                # 写入前的自动备份副本（与用户自建备份目录）不能进语料，
+                # 否则同一工程会被重复计数
+                if "_变更单备份" in f or ".bak." in os.path.basename(f):
+                    continue
+                if "备份" in os.path.basename(os.path.dirname(f)):
                     continue
                 key = os.path.normcase(os.path.abspath(f))
                 if key in seen:
@@ -451,6 +557,36 @@ class Corpus(object):
     def by_code(self, code):
         """按工程编号找历史记录（同名工程的其他标段可作参照）。"""
         return [r for r in self.records if r["code"] == code]
+
+    def project_match(self, code="", name="", add_norm=None, red_norm=None):
+        """找同项目的历史定稿原因（同工程编号 或 同工程名称）。
+
+        返回 (材料相似度, 记录) 或 None。
+        编号相同但名称不同（如同一工程的地下段/地上段）不算同一张单据，
+        避免把另一段的定稿口径套到这一段。
+        """
+        add_norm = add_norm or []
+        red_norm = red_norm or []
+        nm = _norm_name(name)
+        cands = []
+        for r in self.records:
+            if not r["reason"] or r["reason"] == PLACEHOLDER:
+                continue
+            rn = _norm_name(r.get("name"))
+            same = False
+            if code and r.get("code") and r["code"] == code:
+                same = (not nm or not rn or nm == rn or nm in rn or rn in nm)
+            elif nm and rn and (nm == rn or (len(nm) >= 6 and (nm in rn or rn in nm))):
+                same = True
+            if not same:
+                continue
+            score = (0.5 * self.jaccard(add_norm, r["add_norm"])
+                     + 0.5 * self.jaccard(red_norm, r["red_norm"]))
+            cands.append((score, r))
+        if not cands:
+            return None
+        cands.sort(key=lambda x: -x[0])
+        return cands[0]
 
     # -- 润色场景的增强检索 --------------------------------------------
 
@@ -779,25 +915,42 @@ class ReasonBuilder(object):
 
     # -- 正文合成 ------------------------------------------------------
 
-    def build(self, add, red, name="", code="", location="", extra=None):
+    def build(self, add, red, name="", code="", location="", extra=None,
+              reuse_project=True):
         """生成变更原因正文（不含结尾语）。
 
-        返回 (正文, 命中因子列表, 参考案例 list)
+        返回 (正文, 命中因子列表, 参考案例 list, 同项目定稿 dict|None)
+
+        同项目定稿（同工程编号/同工程名称的历史已填原因）优先复用：
+        它承载了材料推不出的现场事实，比纯材料推理更贴近项目实际。
         """
         extra = (extra or "").strip()
         add_norm = sorted(set(x["norm"] for x in add))
         red_norm = sorted(set(x["norm"] for x in red))
         refs = self.corpus.similar(add_norm, red_norm, top=5)
 
-        try:
-            from material_reason import compose
-            body, acts = compose(add, red, name=name, code=code,
-                                  location=location, extra=extra)
-            return body, sorted(set(a.kind for a in acts)), refs
-        except ImportError:
-            pass
+        project = None
+        if reuse_project:
+            hit = self.corpus.project_match(code=code, name=name,
+                                            add_norm=add_norm, red_norm=red_norm)
+            if hit:
+                project = {"score": hit[0], "record": hit[1]}
 
-        return self._build_fallback(add, red, name, location, extra), self.detect(add, red), refs
+        try:
+            from material_reason import compose, derive_actions, reuse_project_reason
+        except ImportError:
+            return (self._build_fallback(add, red, name, location, extra),
+                    self.detect(add, red), refs, None)
+
+        if project:
+            body = reuse_project_reason(project["record"]["reason"], add, red,
+                                        name=name, code=code, extra=extra)
+            hits = sorted(set(a.kind for a in derive_actions(add, red, name, code)))
+            return body, hits, refs, project
+
+        body, acts = compose(add, red, name=name, code=code,
+                             location=location, extra=extra)
+        return body, sorted(set(a.kind for a in acts)), refs, None
 
     # -- 兜底（material_reason 不可用时）-------------------------------
 
@@ -824,13 +977,12 @@ class ReasonBuilder(object):
 
     @staticmethod
     def _site_clause(loc):
-        if loc and any(k in loc for k in ("内", "厂房", "车间", "锅炉房", "厨房")):
-            return ("因{loc}设备及设施较多，需根据现场实际情况调整管位，并增加管件绕行避让障碍，"
-                    "故造成相关管材管件有所增减；".format(loc=loc))
-        if loc:
-            return ("该工程位于{loc}，地下管线及其他设施较多，需根据现场开挖实际情况"
-                    "调整管线敷设位置及长度，并增加管件绕行避让障碍，"
-                    "故造成相关管材管件有所增减；".format(loc=loc))
+        """室内 / 室外兜底句（与 material_reason.fallback_clause 共用实现）。"""
+        try:
+            from material_reason import fallback_clause
+            return fallback_clause(location=loc)
+        except ImportError:
+            pass
         return ("因该工程地下管线及其他设施较多，需根据现场开挖实际情况调整管线敷设位置"
                 "及长度，并增加管件绕行避让障碍，故造成相关管材管件有所增减；")
 
@@ -864,9 +1016,13 @@ class ExcelWriter(object):
             self._app = None
 
     def write(self, path, sheet_name, cells):
-        """写入多个单元格。
+        """写入单个工作表（兼容旧接口）。"""
+        return self.write_many(path, {sheet_name: cells})
 
-        cells: {"B5": "文本", "A49": "文本"}
+    def write_many(self, path, sheet_cells):
+        """一次 COM 会话向多个工作表批量写入。
+
+        sheet_cells: {sheet_name: {"B5": "文本", "A49": "文本"}}
         返回 True 表示成功。
         """
         src = os.path.abspath(path)
@@ -878,9 +1034,10 @@ class ExcelWriter(object):
         try:
             app = self._excel()
             wb = app.Workbooks.Open(tmp)
-            ws = wb.Worksheets(sheet_name)
-            for addr, val in cells.items():
-                ws.Range(addr).Value = val
+            for sheet_name, cells in sheet_cells.items():
+                ws = wb.Worksheets(sheet_name)
+                for addr, val in cells.items():
+                    ws.Range(addr).Value = val
             wb.Save()
             wb.Close()
             wb = None
@@ -896,90 +1053,156 @@ class ExcelWriter(object):
         return ok
 
 
-def fill_reason(path, app_text, qty_text=None, overwrite=False):
-    """把变更原因写入变更单的申请单与工程量变更单两个位置。
+def backup_file(path, backup_dir=None):
+    """写入前把原件复制到 `_变更单备份/`，返回备份路径；失败返回空串。
+
+    默认放在与原件同级的 `_变更单备份` 子目录，文件名带时间戳，
+    避免同名覆盖；该目录已被语料扫描排除。
+    """
+    src = os.path.abspath(path)
+    d = backup_dir or os.path.join(os.path.dirname(src), "_变更单备份")
+    try:
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base, ext = os.path.splitext(os.path.basename(src))
+        dst = os.path.join(d, "%s.%s.bak%s" % (base, ts, ext))
+        shutil.copy2(src, dst)
+        return dst
+    except Exception:
+        return ""
+
+
+def compose_texts(app_text, qty_text=None, existing_app=""):
+    """正文 → (申请单全文, 工程量变更单全文)，结尾语规范化。
+
+    结尾语沿用该文件已有写法（同一单位/同批单据可能用不同变体）。
+    """
+    app_text = (app_text or "").strip()
+    tail_app = detect_tail(existing_app) or TAIL_APP
+    if app_text.endswith(tail_app):
+        app_full = app_text
+    else:
+        core = app_text.rstrip("；;。 ")
+        app_full = (core + "；" + tail_app) if core else tail_app
+
+    if qty_text:
+        q = qty_text.strip()
+        if not q.endswith(TAIL_QTY):
+            qcore = q.rstrip("；;。 ")
+            q = (qcore + "；" + TAIL_QTY) if qcore else TAIL_QTY
+        qty_full = q
+    else:
+        body = app_full[: -len(tail_app)].rstrip("；; ") if app_full.endswith(tail_app) else app_full
+        qty_full = body + "；" + TAIL_QTY
+    return app_full, qty_full
+
+
+def fill_orders(path, items, overwrite=False, backup=True, backup_dir=None):
+    """按单据写入变更原因（一次 Excel 会话写完全部 sheet）。
+
+    items: [{
+        "label":     日志标识，如「767-变更单打印（地下）#1」
+        "app_slot":  (sheet, row, col) 申请单原因格；可为 None
+        "qty_slot":  (sheet, row, col) 工程量单原因格；可为 None
+        "app_text":  申请单正文（不含结尾语亦可）
+        "qty_text":  工程量单正文；None 时由申请单正文派生
+        "existing":  该单据已有内容（安全校验用，非空且未授权则跳过）
+    }]
+
+    返回 dict：ok / written / skipped / backup
+    """
+    written, skipped = [], []
+    cells_by_sheet = {}
+
+    for it in items:
+        if it.get("existing") and not overwrite:
+            skipped.append({"label": it.get("label", ""),
+                            "reason": "变更原因已有内容，未授权覆盖"})
+            continue
+        app_slot, qty_slot = it.get("app_slot"), it.get("qty_slot")
+        if not app_slot and not qty_slot:
+            skipped.append({"label": it.get("label", ""), "reason": "未定位到原因格"})
+            continue
+        app_full, qty_full = compose_texts(it.get("app_text") or "",
+                                          it.get("qty_text"),
+                                          it.get("existing_app") or "")
+        cells = {}
+        if app_slot:
+            cells[_addr(app_slot[1], app_slot[2])] = app_full
+        if qty_slot:
+            cells[_addr(qty_slot[1], qty_slot[2])] = qty_full
+        sheet = (app_slot or qty_slot)[0]
+        cells_by_sheet.setdefault(sheet, {}).update(cells)
+        written.append({"label": it.get("label", ""), "sheet": sheet, "cells": cells})
+
+    if not written:
+        return {"ok": False, "written": [], "skipped": skipped, "backup": ""}
+
+    bak = backup_file(path, backup_dir) if backup else ""
+    w = ExcelWriter()
+    try:
+        ok = w.write_many(path, cells_by_sheet)
+    finally:
+        w.close()
+    return {"ok": ok, "written": written, "skipped": skipped, "backup": bak}
+
+
+def fill_reason(path, app_text, qty_text=None, overwrite=False,
+                order_index=0, backup=True, backup_dir=None):
+    """把变更原因写入一张变更单的申请单与工程量变更单两个位置。
 
     app_text   : 申请单「设计变更原因」正文（不含结尾语亦可，脚本会补全）
     qty_text   : 工程量变更单正文；None 时自动由 app_text 派生
     overwrite  : 是否授权覆盖目标格已有内容。
-
                  False（默认）——目标格已有内容时**中止**，避免用自动生成的
-                 通用文案覆盖掉人工写好的真实原因。此时应改走
-                 `polish` 取素材 → 用 `--body` 回写润色结果。
+                 通用文案覆盖掉人工写好的真实原因。
+                 True——允许覆盖（CLI 的 --body 参数即视为授权）。
+    order_index: 该工作簿内的第几张变更单（0 起）。多张变更单时必须逐张指定。
+    backup     : 写入前是否自动备份原件（默认是）。
 
-                 True——允许覆盖。仅在调用方明确知道自己在写什么时使用
-                 （例如 CLI 的 `--body` 参数）。
-
-    不生成备份副本——写入前请自行确认源文件另有留存。
+    返回 (ok, cells, slots, backup_path)
     """
     co = ChangeOrder(path)
-    slots = co.reason_slots()
-    if "app" not in slots:
-        raise RuntimeError("未找到申请单变更原因单元格位置：%s" % path)
+    orders = co.orders()
+    if not orders:
+        raise RuntimeError("未找到任何变更单（既无『设计变更原因』也无『工程量变更单』）：%s" % path)
+    if order_index < 0 or order_index >= len(orders):
+        raise RuntimeError("变更单序号超出范围：该文件共 %d 张变更单，请求第 %d 张"
+                           % (len(orders), order_index + 1))
+    o = orders[order_index]
+    if not o["app_slot"]:
+        raise RuntimeError("未找到申请单变更原因单元格位置：%s（%s）" % (path, o["sheet"]))
 
-    # 安全校验：目标格已有内容时，除非显式授权覆盖，否则一律中止。
-    sh = co.print_sheet
-    existing = {}
-    for key in ("app", "qty"):
-        if key not in slots:
-            continue
-        _, r, c = slots[key]
-        cur = _clean(sh.cell_value(r, c))
-        if cur and cur != PLACEHOLDER:
-            existing[key] = (r, c, cur)
-
+    existing = o["draft_app"] if o["draft_app"] and o["draft_app"] != PLACEHOLDER else ""
     if existing and not overwrite:
-        detail = "；".join("%s→%s：%s" % (k, _addr(r, c), v[:40])
-                           for k, (r, c, v) in existing.items())
         raise RuntimeError(
             "该变更单的变更原因已填写，为避免覆盖已有内容已中止。\n"
-            "  已填写位置：%s\n"
+            "  位置：%s!%s\n  已有内容：%s\n"
             "  若是用户草稿需润色：请用 polish 命令取素材，再以 --body 写入润色结果；\n"
-            "  若确需用新正文重写：请以 --body 指定新正文（该参数授权覆盖）。" % detail
+            "  若确需用新正文重写：请以 --body 指定新正文（该参数授权覆盖）。"
+            % (o["sheet"], o["app_addr"], existing[:40])
         )
 
     if existing:
-        # 覆盖已有内容且不生成备份——原内容将被永久替换，需明确告知
-        for key, (r, c, v) in existing.items():
-            sys.stderr.write(
-                "[警告] %s 单元格 %s 原有内容将被覆盖（不保留备份）：%s\n"
-                % (key.upper(), _addr(r, c), v[:50])
-            )
+        sys.stderr.write("[警告] %s!%s 原有内容将被覆盖：%s\n"
+                         % (o["sheet"], o["app_addr"], existing[:50]))
 
-    app_text = (app_text or "").strip()
+    res = fill_orders(path, [{
+        "label": "%s#%d" % (o["sheet"], o["index"]),
+        "app_slot": o["app_slot"],
+        "qty_slot": o["qty_slot"],
+        "app_text": app_text,
+        "qty_text": qty_text,
+        "existing": existing,
+        "existing_app": existing,
+    }], overwrite=True, backup=backup, backup_dir=backup_dir)
 
-    # 结尾语：沿用该文件既有的风格（同一单位/同一批变更单的写法可能不同）
-    tail_app = TAIL_APP
-    existing_tail = detect_tail(existing.get("app", ("", "", ""))[2] if existing else "")
-    if existing_tail:
-        tail_app = existing_tail
-    elif qty_text is None and detect_tail(app_text):
-        tail_app = detect_tail(app_text)
-
-    if app_text.endswith(tail_app):
-        # 已含结尾语：仅规范化分隔符
-        app_full = app_text
-    else:
-        # 正文 → 规范为「正文；结尾语」
-        core = app_text.rstrip("；;。 ")
-        app_full = (core + "；" + tail_app) if core else tail_app
-
-    # 正文（不含结尾语），末尾统一以「；」衔接
-    body = app_full[: -len(tail_app)].rstrip("；; ") if app_full.endswith(tail_app) else app_full
-    qty_full = qty_text or (body + "；" + TAIL_QTY)
-    cells = {}
-    sh, r, c = slots["app"]
-    cells[_addr(r, c)] = app_full
-    if "qty" in slots:
-        sh2, r2, c2 = slots["qty"]
-        cells[_addr(r2, c2)] = qty_full
-
-    w = ExcelWriter()
-    try:
-        ok = w.write(path, sh, cells)
-    finally:
-        w.close()
-    return ok, cells, slots
+    cells = res["written"][0]["cells"] if res["written"] else {}
+    slots = {"app": o["app_slot"]}
+    if o["qty_slot"]:
+        slots["qty"] = o["qty_slot"]
+    return res["ok"], cells, slots, res["backup"]
 
 
 def _addr(r, c):

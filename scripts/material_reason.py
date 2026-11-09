@@ -476,6 +476,31 @@ _LEAD = {
     "route_change": "因{sc}施工条件及敷设路径需调整，经报告公司相关代表到现场核实并商议后决定，",
 }
 
+def fallback_clause(scene="", location=""):
+    """无任何工程动作可推时的兜底句（按室内 / 室外分措辞）。
+
+    室内场景（厨房、食堂、车间、锅炉房、厂区、商业场所）不能用
+    「地下管线较多、按现场开挖调整敷设位置」那套市政口径——那会把
+    室内厨房、厂内设备、调压器迁改等工程错误归因。
+    """
+    loc = str(location or "").strip()
+    sc = str(scene or "").strip()
+    if not sc and loc and any(k in loc for k in
+                              ("内", "厨房", "食堂", "车间", "锅炉房", "厂区", "商业区")):
+        sc = loc if loc.startswith("该") else "该" + loc
+    if sc:
+        if not sc.startswith("该"):
+            sc = "该" + sc
+        return ("因{sc}设备及设施较多，需根据现场实际情况调整管位，"
+                "并增加管件绕行避让障碍，故造成相关管材管件有所增减；".format(sc=sc))
+    if loc:
+        return ("该工程位于{loc}，地下管线及其他设施较多，需根据现场开挖实际情况"
+                "调整管线敷设位置及长度，并增加管件绕行避让障碍，"
+                "故造成相关管材管件有所增减；".format(loc=loc))
+    return ("因该工程地下管线及其他设施较多，需根据现场开挖实际情况调整管线敷设位置"
+            "及长度，并增加管件绕行避让障碍，故造成相关管材管件有所增减；")
+
+
 def compose(add, red, name="", code="", location="", extra="", actions=None):
     """基于工程动作组装变更原因正文。
 
@@ -542,15 +567,8 @@ def compose(add, red, name="", code="", location="", extra="", actions=None):
                 if len(body) + len(TAIL_APP) <= MAX_LEN:
                     break
     else:
-        # 兜底
-        loc = location or ""
-        if loc:
-            body = ("该工程位于%s，地下管线及其他设施较多，需根据现场开挖实际情况"
-                    "调整管线敷设位置及长度，并增加管件绕行避让障碍，"
-                    "故造成相关管材管件有所增减；" % loc)
-        else:
-            body = ("因该工程地下管线及其他设施较多，需根据现场开挖实际情况调整管线敷设位置"
-                    "及长度，并增加管件绕行避让障碍，故造成相关管材管件有所增减；")
+        # 兜底：按室内/室外分措辞（与 core._site_clause 共用同一实现）
+        body = fallback_clause(scene=scene, location=location)
 
     return body, acts
 
@@ -577,3 +595,72 @@ _BRIEF_LEAD = {
     "protect": "因该段管线的覆土深度不足，",
     "anti_impact": "因该处车辆进出频繁，为保证燃气管道安全，",
 }
+
+
+# ---------------------------------------------------------------- 同项目定稿复用
+
+_TAIL_PAT = re.compile(r"兹提出[^。；]*。")
+
+#: 定稿复用时允许补充的分句类型
+#: branch_add 的「N 处支管」由弯头数量推得、易失真，故不补
+_REUSE_KINDS = ("pipe_swap", "resize", "instrument", "cap_reserve", "protect",
+                "anti_impact", "support_swap", "tap_change", "route_change")
+
+_CONCL_KW = ("故造成", "故增加", "故减少", "故取消", "造成相关", "造成部分材料",
+             "造成对应的", "材料有所", "材料变更如下")
+
+
+def reuse_project_reason(project_text, add, red, name="", code="", extra=""):
+    """以同项目历史定稿为骨架，补入本次材料推出的工程动作。
+
+    材料只能证明「改了什么」，证明不了「为什么」。同项目定稿里已有
+    「设计管位顶部有蒸汽管道」「厨房设施与设计管位安全间距不足」这类
+    现场事实，比纯材料推理可靠，因此优先沿用其口径，仅补充本次实际增减
+    涉及、但定稿未提及的工程动作。
+    """
+    try:
+        from gas_change_core import _norm as _cn
+    except Exception:
+        def _cn(s):
+            return str(s).lower()
+
+    core = _TAIL_PAT.sub("", str(project_text or "")).strip()
+    # 定稿常见收束语「综上所述」「综上原因」「综上」不带句号，需单独剥掉
+    for w in ("综上所述", "综上原因", "综上"):
+        core = core.replace(w, "")
+    core = core.rstrip("；;。 ").strip("；;，, ")
+    segs = [s.strip() for s in re.split(r"[；;]", core) if s.strip()]
+    if extra:
+        segs.insert(0, extra.rstrip("。；; "))
+
+    acts = derive_actions(add, red, name, code)
+    clauses = []
+    for a in acts:
+        if a.kind not in _REUSE_KINDS:
+            continue
+        lead = _LEAD.get(a.kind, "")
+        if not lead or "{sc}" in lead:
+            continue
+        if any((_cite(m) in core) or (_base(_cn(m)) in core)
+               for m in (a.materials or [])):
+            continue
+        clause = lead + a.text
+        if not any(k in clause for k in ("故造成", "故增加", "故减少", "故取消")):
+            clause += "，故造成相关材料有所增减"
+        clauses.append(clause)
+        if len(clauses) >= 2:
+            break
+
+    has_concl = any(k in core for k in _CONCL_KW)
+    if not clauses and not has_concl:
+        clauses = ["故造成相关管材管件有所增减"]
+
+    body = ""
+    while True:
+        parts = segs + clauses
+        body = "；".join(p for p in parts if p) + "；"
+        if len(body) + len(TAIL_APP) <= MAX_LEN or not clauses:
+            break
+        clauses.pop()
+
+    return body

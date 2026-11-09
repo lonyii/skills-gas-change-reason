@@ -33,7 +33,7 @@ import argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gas_change_core import (  # noqa: E402
-    ChangeOrder, Corpus, ReasonBuilder, fill_reason,
+    ChangeOrder, Corpus, ReasonBuilder, fill_reason, fill_orders,
     ARCHIVE_ROOT, ARCHIVE_ROOTS, PLACEHOLDER, TAIL_APP, TAIL_QTY,
 )
 
@@ -46,15 +46,23 @@ def cmd_polish(args):
     供 AI 参照历史语料把草稿润色成规范文案，再以 fill --body 写回。
     """
     co = ChangeOrder(args.file)
-    if co.print_sheet is None:
-        print("[错误] 未找到 '*变更单打印' 工作表。")
+    orders = co.orders()
+    if not orders:
+        print("[错误] 未找到 '*变更单打印' 工作表或变更单。")
         return 2
-    code, name = co.header()
-    add, red = co.materials()
-    draft = co.read_draft()
+    idx = max(1, args.order or 1)
+    if idx > len(orders):
+        print("[错误] 该文件共 %d 张变更单，--order=%d 超出范围" % (len(orders), idx))
+        return 2
+    o = orders[idx - 1]
+    code, name = o["code"], o["name"]
+    add, red = o["add"], o["red"]
+    draft = co.read_draft(o)
 
     print("=" * 70)
     print("润色素材包 —— %s  %s" % (code, name))
+    print("工作表 %s（该文件共 %d 张变更单，本张为第 %d 张）"
+          % (o["sheet"], len(orders), idx))
     print("=" * 70)
 
     # 1) 用户草稿（提示词）
@@ -123,7 +131,8 @@ def cmd_polish(args):
 
     print("\n" + "=" * 70)
     print("下一步：AI 参照以上素材润色出正文，然后写回——")
-    print('  python fill_change_reason.py fill "%s" --body "<润色后的正文>"' % args.file)
+    print('  python fill_change_reason.py fill "%s" --order %d --body "<润色后的正文>"'
+          % (args.file, idx))
     print("=" * 70)
     return 0
 
@@ -149,102 +158,245 @@ _STYLE_RULES = [
 ]
 
 
-def cmd_analyze(args):
-    co = ChangeOrder(args.file)
-    if co.print_sheet is None:
-        print("[错误] 未找到 '*变更单打印' 工作表，文件可能不是变更单。")
-        print("       现有工作表: %s" % ", ".join(co.sheet_names))
-        return 2
-    code, name = co.header()
-    add, red = co.materials()
-    print("=" * 70)
-    print("工程编号: %s    工程名称: %s" % (code, name))
-    # 工程编号分类解读（依据《工程建设项目分类、编码及命名指引》附表1）
+PLACEHOLDER_TXT = PLACEHOLDER
+
+
+def _is_backup_path(path):
+    """自动备份 / 用户自建备份目录里的副本不参与批量处理。"""
+    parts = os.path.normpath(path).split(os.sep)
+    if any("备份" in p for p in parts[:-1]):
+        return True
+    return ".bak." in os.path.basename(path)
+
+
+def _collect_files(paths):
+    """把参数（文件 / 目录）展开成 .xls 列表；自动跳过备份副本。"""
+    out, seen = [], set()
+    for p in paths:
+        ap = os.path.abspath(p)
+        if os.path.isdir(ap):
+            for f in sorted(glob.glob(os.path.join(ap, "**", "*.xls"), recursive=True)):
+                if _is_backup_path(f):
+                    continue
+                key = os.path.normcase(os.path.abspath(f))
+                if key not in seen:
+                    seen.add(key)
+                    out.append(f)
+        elif os.path.isfile(ap):
+            key = os.path.normcase(ap)
+            if key not in seen:
+                seen.add(key)
+                out.append(ap)
+        else:
+            print("[忽略] 路径不存在：%s" % p)
+    return out
+
+
+def _status_text(o):
+    """原因格现状：空缺 / 占位符 / 已填（草稿）。"""
+    if not o["has_draft"]:
+        return "空缺"
+    if (o["draft_app"] or "").strip() == PLACEHOLDER_TXT:
+        return "占位符"
+    return "已填"
+
+
+def _order_title(o):
+    return "第%d张[%s]" % (o["seq"], o["sheet"])
+
+
+def _category_text(code):
     try:
         from project_code import describe, parse_code
-        desc = describe(code)
-        if desc:
-            p = parse_code(code)
-            group = p["group"]
-            label = p["cat_name"] if group == p["cat_name"] else "%s（%s）" % (p["cat_name"], group)
-            print("项目分类: %s" % label)
-            print("编码含义: %s" % desc)
+        p = parse_code(code)
+        if p:
+            label = p["cat_name"] if p["group"] == p["cat_name"] \
+                else "%s（%s）" % (p["cat_name"], p["group"])
+            return "%s %s" % (label, describe(code))
     except ImportError:
         pass
-    print("工作表  : %s" % co.print_sheet.name)
-    print("=" * 70)
-    print("\n增加材料 (%d):" % len(add))
-    for x in add:
-        print("   + %-45s %s" % (x["name"], x["qty"]))
-    print("\n减少材料 (%d):" % len(red))
-    for x in red:
-        print("   - %-45s %s" % (x["name"], x["qty"]))
+    return ""
 
+
+def cmd_analyze(args):
+    """分析一个或多个文件 / 目录，逐张变更单预览原因与风险提示。"""
+    files = _collect_files(args.files)
+    if not files:
+        print("[错误] 没有可分析的 .xls 文件")
+        return 2
     corpus = Corpus(ARCHIVE_ROOTS, CACHE)
     rb = ReasonBuilder(corpus)
-    body, hits, refs = rb.build(add, red, name=name, code=code,
-                                location=args.location or "", extra=args.extra or "")
+    total_orders = 0
+    fallback_cnt = 0
 
-    # 展示推导出的工程动作（材料→动作的推理过程）
-    try:
-        from material_reason import derive_actions
-        acts = derive_actions(add, red, name, code)
-        if acts:
-            print("\n" + "-" * 70)
-            print("材料 → 工程动作 推理:")
-            for a in acts:
-                print("   [%s] %s" % (a.kind, a.text))
-    except ImportError:
-        pass
+    for path in files:
+        co = ChangeOrder(path)
+        orders = co.orders()
+        print("=" * 78)
+        print("文件: %s" % os.path.basename(path))
+        if not orders:
+            print("  [错误] 未找到变更单（无「设计变更原因」也无「工程量变更单」）")
+            print("         现有工作表：%s" % ", ".join(co.sheet_names))
+            continue
+        print("  变更单 %d 张" % len(orders))
+        built = []
+        for o in orders:
+            total_orders += 1
+            body, hits, refs, proj = rb.build(o["add"], o["red"], name=o["name"],
+                                              code=o["code"],
+                                              location=args.location,
+                                              extra=args.extra)
+            # 沿用同项目定稿时即便没有材料动作，也不属于「兜底句」
+            fallback = (not hits) and not proj
+            if fallback:
+                fallback_cnt += 1
+            built.append((o, body, hits, refs, proj, fallback))
+            proj_txt = "无"
+            if proj:
+                proj_txt = ("同项目(%.2f)" % proj["score"]) if proj["score"] > 0 else "同项目(定稿)"
+            print("  第%d张［%s］%s %s  增%d/减%d  现状:%s %s  定稿:%s  因子:%s%s" % (
+                o["seq"], o["sheet"], o["code"] or "-", o["name"] or "-",
+                len(o["add"]), len(o["red"]), _status_text(o),
+                o["app_addr"] if o["has_draft"] else "",
+                proj_txt, ",".join(hits) if hits else "无",
+                "  ⚠兜底" if fallback else ""))
 
-    print("\n" + "-" * 70)
-    print("命中触发因子: %s" % (", ".join(hits) if hits else "无"))
-    print("-" * 70)
-    print("\n【生成的变更原因正文】\n")
-    print(body.rstrip("；") + "；" + TAIL_APP)
-    print("\n【工程量变更单版本结尾】\n")
-    print(body.rstrip("；") + "；" + TAIL_QTY)
+        for (o, body, hits, refs, proj, fallback) in built:
+            if args.summary:
+                continue
+            print("\n" + "-" * 78)
+            print("▍第%d张  %s!" % (o["seq"], o["sheet"]), end="")
+            print("%s  %s" % (o["app_addr"], o["qty_addr"]))
+            print("工程编号: %s    工程名称: %s" % (o["code"] or "-", o["name"] or "-"))
+            cat = _category_text(o["code"])
+            if cat:
+                print("项目分类: %s" % cat)
+            if args.detail:
+                print("\n增加材料 (%d):" % len(o["add"]))
+                for x in o["add"]:
+                    print("   + %-45s %s" % (x["name"], x["qty"]))
+                print("减少材料 (%d):" % len(o["red"]))
+                for x in o["red"]:
+                    print("   - %-45s %s" % (x["name"], x["qty"]))
+                try:
+                    from material_reason import derive_actions
+                    acts = derive_actions(o["add"], o["red"], o["name"], o["code"])
+                    if acts:
+                        print("\n材料 → 工程动作 推理:")
+                        for a in acts:
+                            print("   [%s] %s" % (a.kind, a.text))
+                except ImportError:
+                    pass
 
-    print("\n" + "-" * 70)
-    print("参考历史案例 (材料相似度):")
-    for s, r in refs:
-        print("  [%.3f] %s" % (s, r["file"]))
-        print("        %s" % (r["reason"][:110] + ("..." if len(r["reason"]) > 110 else "")))
+            if proj:
+                print("\n【同项目历史定稿】%s" % proj["record"]["file"])
+                print("  %s" % proj["record"]["reason"])
+                print("  → 本次正文沿用该口径，仅补入定稿未提及的本次材料动作")
+                if not hits:
+                    print("    （本次增减材料未推出新的工程动作，正文即为定稿口径 + 结论句）")
+            if fallback:
+                print("\n⚠ 未命中任何工程动作，正文回落到兜底句 —— 正式单据前请用")
+                print("   --location / --extra 补充现场事实，或用 --body 指定正文。")
+
+            print("\n【申请单正文】")
+            print(body.rstrip("；") + "；" + TAIL_APP)
+            print("\n【工程量变更单正文】")
+            print(body.rstrip("；") + "；" + TAIL_QTY)
+
+            if args.detail or args.summary:
+                continue
+            print("\n参考历史案例:")
+            for s, r in refs:
+                print("  [%.3f] %s" % (s, r["file"]))
+                print("        %s" % (r["reason"][:100] + ("..." if len(r["reason"]) > 100 else "")))
+
+    print("\n" + "=" * 78)
+    print("合计 %d 个文件 / %d 张变更单 | 兜底句 %d 张" % (len(files), total_orders, fallback_cnt))
+    if fallback_cnt:
+        print("提示：标注 ⚠ 的变更单材料推不出工程动作，自动正文只是兜底，建议人工核校。")
     return 0
 
 
 def cmd_fill(args):
+    """批量写入：一个文件内的所有变更单各按自己的材料生成并写回。"""
+    files = _collect_files(args.files)
+    if not files:
+        print("[错误] 没有可写入的 .xls 文件")
+        return 2
     corpus = Corpus(ARCHIVE_ROOTS, CACHE)
     rb = ReasonBuilder(corpus)
-    co = ChangeOrder(args.file)
-    if co.print_sheet is None:
-        print("[错误] 未找到 '*变更单打印' 工作表。")
-        return 2
-    code, name = co.header()
-    add, red = co.materials()
+    rc = 0
 
-    # --body 是使用者/AI 明确指定的内容，授权覆盖已有原因；
-    # 自动生成的内容不授权，避免用通用文案盖掉人工写好的真实原因。
-    explicit = bool(args.body)
-    if explicit:
-        body = args.body.rstrip("。；;") + "。"
-    else:
-        body, hits, refs = rb.build(add, red, name=name, code=code,
-                                    location=args.location or "",
-                                    extra=args.extra or "")
+    for path in files:
+        co = ChangeOrder(path)
+        orders = co.orders()
+        print("=" * 78)
+        print("文件: %s" % os.path.basename(path))
+        if not orders:
+            print("  [跳过] 未找到变更单")
+            rc = 1
+            continue
 
-    ok, cells, slots = None, None, None
-    try:
-        ok, cells, slots = fill_reason(args.file, body, overwrite=explicit)
-    except RuntimeError as exc:
-        print("[已中止] %s" % exc)
-        return 1
-    print("写入完成: %s" % ("成功" if ok else "失败"))
-    print("  工作表: %s" % slots["app"][0])
-    for addr, val in cells.items():
-        print("  %-6s <- %s" % (addr, val[:80] + ("..." if len(val) > 80 else "")))
-    print("  提示: 不生成备份副本，原变更原因已被覆盖")
-    return 0 if ok else 1
+        if args.order is not None:
+            if not (1 <= args.order <= len(orders)):
+                print("  [跳过] --order=%d 超出范围（共 %d 张）" % (args.order, len(orders)))
+                rc = 1
+                continue
+            targets = [orders[args.order - 1]]
+        else:
+            targets = orders
+
+        if args.body and len(orders) > 1 and args.order is None:
+            print("  [跳过] 该文件有 %d 张变更单，--body 必须配合 --order 指定写哪一张"
+                  % len(orders))
+            rc = 1
+            continue
+
+        items = []
+        for o in targets:
+            if args.body:
+                body = args.body
+            else:
+                body, hits, refs, proj = rb.build(o["add"], o["red"], name=o["name"],
+                                                  code=o["code"],
+                                                  location=args.location,
+                                                  extra=args.extra)
+                if proj:
+                    print("  · %s 沿用同项目定稿口径（相似度 %.2f）"
+                          % (_order_title(o), proj["score"]))
+                elif not hits:
+                    print("  ⚠ %s 未命中工程动作，正文为兜底句，建议先 analyze 人工核校"
+                          % _order_title(o))
+            existing = o["draft_app"] if o["draft_app"] and o["draft_app"] != PLACEHOLDER_TXT else ""
+            items.append({
+                "label": _order_title(o),
+                "app_slot": o["app_slot"],
+                "qty_slot": o["qty_slot"],
+                "app_text": body,
+                "qty_text": None,
+                "existing": existing,
+                "existing_app": existing,
+            })
+
+        res = fill_orders(path, items,
+                          overwrite=bool(args.body) or args.overwrite,
+                          backup=not args.no_backup,
+                          backup_dir=args.backup_dir or None)
+
+        if res["skipped"]:
+            for s in res["skipped"]:
+                print("  · %s 跳过：%s" % (s["label"], s["reason"]))
+        for w in res["written"]:
+            print("  → %s 写入 %s" % (w["sheet"],
+                                     ", ".join(w["cells"].keys())))
+            for addr, val in w["cells"].items():
+                print("     %-5s ← %s" % (addr, val[:70] + ("..." if len(val) > 70 else "")))
+        if res["backup"]:
+            print("  备份: %s" % res["backup"])
+        print("  结果: %s" % ("成功" if res["ok"] else "失败/无写入"))
+        if not res["ok"]:
+            rc = 1
+    return rc
 
 
 def cmd_reindex(args):
@@ -345,9 +497,19 @@ def cmd_doctor(args):
 def cmd_search(args):
     corpus = Corpus(ARCHIVE_ROOTS, CACHE)
     co = ChangeOrder(args.file)
-    add, red = co.materials()
+    orders = co.orders()
+    if not orders:
+        print("[错误] 未找到变更单")
+        return 2
+    idx = max(1, args.order or 1)
+    if idx > len(orders):
+        print("[错误] 该文件共 %d 张变更单，--order=%d 超出范围" % (len(orders), idx))
+        return 2
+    o = orders[idx - 1]
+    add, red = o["add"], o["red"]
     add_n = sorted(set(x["norm"] for x in add))
     red_n = sorted(set(x["norm"] for x in red))
+    print("检索：%s 第%d张 %s %s" % (o["sheet"], idx, o["code"], o["name"]))
     for s, r in corpus.similar(add_n, red_n, top=args.top):
         print("[%.3f] %s" % (s, r["file"]))
         print("   原因: %s" % r["reason"])
@@ -542,17 +704,25 @@ def main():
     ap = argparse.ArgumentParser(description="燃气工程变更单变更原因生成")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("analyze", help="分析变更单并预览原因")
-    p.add_argument("file")
+    p = sub.add_parser("analyze", help="分析变更单并预览原因（支持文件/目录批量）")
+    p.add_argument("files", nargs="+", help="变更单 .xls 文件或目录（可多个）")
     p.add_argument("--location", default="", help="现场位置描述，如「南昌县老城区」")
     p.add_argument("--extra", default="", help="补充的现场事实描述")
+    p.add_argument("--summary", action="store_true", help="只看总览，不打印正文")
+    p.add_argument("--detail", action="store_true", help="附材料明细与动作推理")
     p.set_defaults(func=cmd_analyze)
 
-    p = sub.add_parser("fill", help="生成并写入变更原因")
-    p.add_argument("file")
+    p = sub.add_parser("fill", help="生成并写入变更原因（支持文件/目录批量、多张变更单）")
+    p.add_argument("files", nargs="+", help="变更单 .xls 文件或目录（可多个）")
     p.add_argument("--location", default="")
     p.add_argument("--extra", default="")
     p.add_argument("--body", default="", help="直接指定正文，覆盖自动生成")
+    p.add_argument("--order", type=int, default=None,
+                   help="只处理该文件中的第 N 张变更单（1 起）")
+    p.add_argument("--overwrite", action="store_true",
+                   help="授权覆盖已有原因（--body 本身即授权）")
+    p.add_argument("--no-backup", action="store_true", help="写入前不备份原件")
+    p.add_argument("--backup-dir", default="", help="备份目录（默认原件同级 _变更单备份）")
     p.set_defaults(func=cmd_fill)
 
     p = sub.add_parser("reindex", help="重建历史语料库")
@@ -561,6 +731,7 @@ def main():
 
     p = sub.add_parser("polish", help="输出润色素材包（草稿+材料+案例+文风），供 AI 润色")
     p.add_argument("file")
+    p.add_argument("--order", type=int, default=1, help="该文件中的第 N 张变更单（1 起）")
     p.add_argument("--top", type=int, default=5)
     p.set_defaults(func=cmd_polish)
 
@@ -569,6 +740,7 @@ def main():
 
     p = sub.add_parser("search", help="检索相似历史案例")
     p.add_argument("file")
+    p.add_argument("--order", type=int, default=1, help="该文件中的第 N 张变更单（1 起）")
     p.add_argument("--top", type=int, default=8)
     p.set_defaults(func=cmd_search)
 
