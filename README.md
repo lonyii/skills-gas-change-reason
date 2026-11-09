@@ -1,9 +1,18 @@
 # 燃气工程变更原因生成
 
-> **首次安装：把 `gas-change-reason.zip` 交给你的 AI，说一句「帮我安装这个技能包」即可自动装好（依赖安装、路径配置、自检校验全部自动完成）；之后每次把变更单发给它，说「帮我填写这份变更单的变更原因」即可。**
+> **首次安装（二选一）**：
+> ① 把 `gas-change-reason.zip` 交给你的 AI，说一句「帮我安装这个技能包」；
+> ② 只给仓库地址 `https://github.com/lonyii/skills-gas-change-reason`，让 AI 从 GitHub 拉取安装。
+> 之后每次把变更单发给它，说「帮我填写这份变更单的变更原因」即可。
 
 给一份**只有变更内容、变更原因为空**的燃气工程设计变更单，本技能参照公司 314 份历史变更单的写法，
 生成规范的变更原因并写入 `*-变更单打印` 表的 `[变更原因]` 单元格（申请单 B5 + 工程量变更单 A49）。
+
+| | |
+|---|---|
+| 📦 仓库 | <https://github.com/lonyii/skills-gas-change-reason> |
+| 🔄 自动更新 | `python scripts/fill_change_reason.py update` |
+| 📌 版本 | 见仓库根的 `VERSION` 文件 |
 
 ---
 
@@ -41,6 +50,21 @@ python install.py --archive "D:\你的路径\设计变更单归档"
 python install.py --target "D:\skills\gas-change-reason"
 ```
 
+### 步骤 3 — 直接从 GitHub 安装（用户没给 zip 时）
+
+```bash
+git clone --depth 1 https://github.com/lonyii/skills-gas-change-reason.git
+python skills-gas-change-reason/scripts/install.py --from-github
+```
+
+或者不克隆、直接让安装脚本自己拉：
+
+```bash
+python install.py --from-github
+```
+
+`--from-github` 会先从仓库下载源码再安装，其余流程（依赖安装、归档探测、自检）与本地安装一致。
+
 ### 步骤 4 — 处理变更单
 
 收到变更单后，**先看变更原因单元格有没有内容**：
@@ -62,6 +86,9 @@ python <安装路径>/scripts/fill_change_reason.py analyze "<变更单.xls>"
   python fill_change_reason.py fill "<变更单.xls>" --body "<润色后的正文>"
   ```
 
+> ⚠️ 直接跑 `fill`（不带 `--body`）遇到已有内容会**中止并报错**——这是保护机制，
+> 不要绕过它。要覆盖必须走 `--body`，那是"明确指定新正文"的语义。
+
 ### 步骤 5 — 确认
 
 安装脚本末尾会打印 `安装完成 ✓` 和实际安装路径。若自检有 ✗ 项，重跑：
@@ -73,6 +100,31 @@ python <安装路径>/scripts/fill_change_reason.py doctor
 ### 步骤 6 — 交给用户
 
 告知：装好了，以后直接把变更单路径发给你，说「帮我填写这份变更单的变更原因」即可。
+需要更新版本时可以说「更新一下变更原因技能」。
+
+---
+
+## 版本更新
+
+```bash
+cd <安装路径>/scripts
+
+# 检查是否有新版本（不改任何文件）
+python fill_change_reason.py update --check
+
+# 更新到最新版
+python fill_change_reason.py update
+
+# 更新出问题可回滚
+python fill_change_reason.py update --rollback
+```
+
+更新走 GitHub 公开仓库，**不需要账号或 Token**。机制要点：
+
+- 版本号在仓库根的 `VERSION` 文件
+- 下载后先校验必需文件齐全，再原子替换；失败自动回滚
+- **本地归档目录配置（`config.json`）会保留**，升级不会丢
+- 已是最新版本时不做任何写入
 
 ---
 
@@ -102,6 +154,10 @@ python fill_change_reason.py fill "变更单.xls"
 
 # 补充材料推断不出的现场原因（最影响准确度）
 python fill_change_reason.py fill "变更单.xls" --extra "因厂方要求将调压柜移位"
+
+# 检查 / 安装更新
+python fill_change_reason.py update --check
+python fill_change_reason.py update
 ```
 
 ### 命令速查
@@ -114,6 +170,8 @@ python fill_change_reason.py fill "变更单.xls" --extra "因厂方要求将调
 | `fill <文件>` | 生成并写入变更原因 | **是**（直接覆盖，不备份） |
 | `search <文件>` | 检索相似历史案例 | 否 |
 | `reindex` | 重建历史语料库缓存 | 改缓存 |
+| `update [--check]` | 检查 / 安装技能更新 | **是**（替换技能目录，保留本地配置） |
+| `update --rollback` | 回滚到上一个版本 | **是** |
 
 `fill` / `analyze` 可选参数：
 
@@ -185,7 +243,10 @@ B5 + A49
 
 - **写入需要本机安装 Microsoft Excel**（`.xls` 老格式 + Excel COM 写入）。只生成不写入则不需要。
 - **材料只能反映「改了什么」，反映不了「为什么改」**。现场真实原因请用 `--extra` 补充，这一步最影响准确度。
-- **写入直接覆盖原文件，不生成 `.备份.xls` 副本**。目标格已有内容时自动生成模式会拒绝写入（防误操作）；用 `--body` 显式指定时允许覆盖，此时会在终端打印告警提示原内容将被永久替换。
+- **写入直接覆盖原文件，不生成 `.备份.xls` 副本**。三种情形行为不同：
+  - 目标格为空 → `fill` 自动生成并写入
+  - 目标格已有内容 → `fill`（不带 `--body`）**会中止**并提示改走 polish 流程
+  - `polish` 润色后 → `fill --body "<润色结果>"` 授权覆盖，终端会打印告警提示原内容将被永久替换
 - 目前针对 `.xls` 老格式设计，`.xlsx` 需另做适配。
 
 ## 目录内容
@@ -194,7 +255,10 @@ B5 + A49
 |---|---|
 | `SKILL.md` | 技能定义，Agent 据此发现与调用 |
 | `README.md` | 本文件 |
-| `scripts/install.py` | 一键安装脚本 |
+| `VERSION` | 版本号（更新时据此判断是否有新版） |
+| `CHANGELOG.md` | 更新日志（每次版本的可感知变化） |
+| `scripts/install.py` | 一键安装脚本（`--from-github` 支持从仓库直接装） |
+| `scripts/update.py` | 自动更新：检查版本 → 下载 → 校验 → 原子替换 → 失败回滚 |
 | `scripts/gas_change_core.py` | 变更单读写 + 语料库 |
 | `scripts/material_reason.py` | 材料级推理引擎 |
 | `scripts/project_code.py` | 工程编号分类映射 |
