@@ -218,14 +218,20 @@ def cmd_fill(args):
         return 2
     code, name = co.header()
     add, red = co.materials()
-    body, hits, refs = rb.build(add, red, name=name, code=code,
-                                location=args.location or "", extra=args.extra or "")
-    if args.body:
+
+    # --body 是使用者/AI 明确指定的内容，授权覆盖已有原因；
+    # 自动生成的内容不授权，避免用通用文案盖掉人工写好的真实原因。
+    explicit = bool(args.body)
+    if explicit:
         body = args.body.rstrip("。；;") + "。"
+    else:
+        body, hits, refs = rb.build(add, red, name=name, code=code,
+                                    location=args.location or "",
+                                    extra=args.extra or "")
 
     ok, cells, slots = None, None, None
     try:
-        ok, cells, slots = fill_reason(args.file, body)
+        ok, cells, slots = fill_reason(args.file, body, overwrite=explicit)
     except RuntimeError as exc:
         print("[已中止] %s" % exc)
         return 1
@@ -345,6 +351,22 @@ def cmd_search(args):
     return 0
 
 
+def cmd_update(args):
+    """检查 / 安装技能更新。"""
+    try:
+        import update as upd
+    except ImportError:
+        print("[错误] 缺少 update 模块，无法自更新。")
+        print("       可手动下载：https://github.com/lonyii/skills-gas-change-reason")
+        return 2
+    if args.rollback:
+        return upd.rollback()
+    if args.check:
+        remote, local, _has = upd.do_check()
+        return 0 if remote else 2
+    return upd.do_update()
+
+
 def main():
     ap = argparse.ArgumentParser(description="燃气工程变更单变更原因生成")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -378,6 +400,11 @@ def main():
     p.add_argument("file")
     p.add_argument("--top", type=int, default=8)
     p.set_defaults(func=cmd_search)
+
+    p = sub.add_parser("update", help="检查/安装技能更新（从 GitHub 仓库）")
+    p.add_argument("--check", action="store_true", help="只检查是否有新版本，不更新")
+    p.add_argument("--rollback", action="store_true", help="回滚到上一个版本")
+    p.set_defaults(func=cmd_update)
 
     args = ap.parse_args()
     sys.exit(args.func(args))

@@ -329,10 +329,10 @@ def derive_actions(add, red, name="", code=""):
     # --- 5c. 碰接方式 / 接入口变更 ---
     # 特征：新增鞍型电熔变径三通等碰接件（改为不停输/三通碰接），
     #       或 PE管 与 钢塑转换/镀锌管/法兰 等互换（换接入口）。
-    tap_conn = next((x for x in A if any(k in x["norm"] for k in
-                                         ("鞍型电熔变径", "鞍型电熔管件", "电熔鞍型"))), None)
-    tap_removed = next((x for x in R if any(k in x["norm"] for k in
-                                            ("鞍型电熔变径", "鞍型电熔管件", "电熔鞍型"))), None)
+    _SADDLE_KW = ("鞍型电熔变径", "鞍型电熔管件", "电熔鞍型", "鞍型旁通", "鞍型电熔")
+    _ELEC_KW = ("电熔三通", "电熔弯头", "热熔三通", "热熔弯头", "热熔变径", "电熔变径")
+    tap_conn = next((x for x in A if any(k in x["norm"] for k in _SADDLE_KW)), None)
+    tap_removed = next((x for x in R if any(k in x["norm"] for k in _SADDLE_KW)), None)
     if tap_conn and tap_removed:
         acts.append(Action(
             "tap_change",
@@ -341,6 +341,27 @@ def derive_actions(add, red, name="", code=""):
                 t1n=_cite(tap_conn["name"]), t1q=tap_conn["qty"],
                 t0n=_cite(tap_removed["name"]), t0q=tap_removed["qty"]),
             [tap_conn["name"], tap_removed["name"]]))
+    elif tap_removed:
+        # 鞍型电熔管件（不停输碰接件）取消，改用常规熔接件（三通/弯头）碰接。
+        # 这是历史语料中最高频的碰接变更形态（27 例）：
+        #   减 鞍型电熔管件_BFPE110  →  增 电熔弯头_dn63_90° / 电熔三通_dn110×90
+        # 常见缘由：不停输设备无法进场、作业面不够、埋深不足影响安全、
+        #           探明实际管位与图纸不符、要求停气碰接。
+        elec_added = [x for x in A if any(k in x["norm"] for k in _ELEC_KW)]
+        if elec_added:
+            add_txt = "、".join("%s-%s" % (_cite(x["name"]), x["qty"]) for x in elec_added[:3])
+            acts.append(Action(
+                "tap_change",
+                "取消{t0n}-{t0q}不停输碰接，改为{add}常规熔接碰接".format(
+                    t0n=_cite(tap_removed["name"]), t0q=tap_removed["qty"], add=add_txt),
+                [tap_removed["name"]] + [x["name"] for x in elec_added[:3]]))
+        else:
+            # 无替代熔接件可点名时，用概括表述（见 _BRIEF）
+            acts.append(Action(
+                "tap_change",
+                "取消{t0n}-{t0q}不停输碰接，改为停气常规熔接碰接".format(
+                    t0n=_cite(tap_removed["name"]), t0q=tap_removed["qty"]),
+                [tap_removed["name"]]))
     else:
         # PE 管与「钢塑转换 / 镀锌管 / 焊接法兰」互换 → 换接入口
         # 注意：必须用原始 name 过滤——norm 已剥离括号内容，
@@ -543,7 +564,7 @@ _BRIEF = {
     "protect": "部分管段已按要求敷设保护沟",
     "anti_impact": "已自制防撞护栏",
     "support_swap": "原支架已改用导向支架代替",
-    "tap_change": "碰接方式已作相应调整",
+    "tap_change": "碰接方式已改用常规熔接碰接",
     "route_change": "敷设路径已作相应调整",
 }
 

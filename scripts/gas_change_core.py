@@ -896,11 +896,19 @@ class ExcelWriter(object):
         return ok
 
 
-def fill_reason(path, app_text, qty_text=None):
+def fill_reason(path, app_text, qty_text=None, overwrite=False):
     """把变更原因写入变更单的申请单与工程量变更单两个位置。
 
-    app_text : 申请单「设计变更原因」正文（不含结尾语亦可，脚本会补全）
-    qty_text : 工程量变更单正文；None 时自动由 app_text 派生
+    app_text   : 申请单「设计变更原因」正文（不含结尾语亦可，脚本会补全）
+    qty_text   : 工程量变更单正文；None 时自动由 app_text 派生
+    overwrite  : 是否授权覆盖目标格已有内容。
+
+                 False（默认）——目标格已有内容时**中止**，避免用自动生成的
+                 通用文案覆盖掉人工写好的真实原因。此时应改走
+                 `polish` 取素材 → 用 `--body` 回写润色结果。
+
+                 True——允许覆盖。仅在调用方明确知道自己在写什么时使用
+                 （例如 CLI 的 `--body` 参数）。
 
     不生成备份副本——写入前请自行确认源文件另有留存。
     """
@@ -909,9 +917,7 @@ def fill_reason(path, app_text, qty_text=None):
     if "app" not in slots:
         raise RuntimeError("未找到申请单变更原因单元格位置：%s" % path)
 
-    # 安全校验：
-    #   自动生成（未指定正文）→ 目标格已有内容则中止，避免盲目覆盖；
-    #   显式指定正文（--body，AI 润色结果）→ 允许覆盖。
+    # 安全校验：目标格已有内容时，除非显式授权覆盖，否则一律中止。
     sh = co.print_sheet
     existing = {}
     for key in ("app", "qty"):
@@ -922,14 +928,14 @@ def fill_reason(path, app_text, qty_text=None):
         if cur and cur != PLACEHOLDER:
             existing[key] = (r, c, cur)
 
-    if existing and not app_text:
+    if existing and not overwrite:
         detail = "；".join("%s→%s：%s" % (k, _addr(r, c), v[:40])
                            for k, (r, c, v) in existing.items())
         raise RuntimeError(
             "该变更单的变更原因已填写，为避免覆盖已有内容已中止。\n"
             "  已填写位置：%s\n"
             "  若是用户草稿需润色：请用 polish 命令取素材，再以 --body 写入润色结果；\n"
-            "  若确需重写：请用 --body 指定新正文。" % detail
+            "  若确需用新正文重写：请以 --body 指定新正文（该参数授权覆盖）。" % detail
         )
 
     if existing:

@@ -34,6 +34,9 @@ SKILL_NAME = "gas-change-reason"
 #: pywin32 没有顶层 pywin32 模块，只有 win32com 子包，检测时须用后者
 NEED = [("xlrd", "xlrd"), ("pywin32", "win32com.client")]
 
+#: 包名 → 检测用模块名（missing 列表里存的是包名，不是元组）
+_MOD_OF = dict(NEED)
+
 
 def log(tag, msg):
     print("[%s] %s" % (tag, msg))
@@ -98,7 +101,7 @@ def install_deps(force=False):
         err("pip 安装失败，请手动执行：%s" % " ".join(cmd))
         err((r.stderr or r.stdout or "")[-600:])
         return False
-    still = [pkg for pkg, mod in missing if not has_module(mod)]
+    still = [pkg for pkg in missing if not has_module(_MOD_OF[pkg])]
     if still:
         err("安装后仍无法导入：%s" % "、".join(still))
         return False
@@ -208,6 +211,67 @@ def run_doctor(skill_dir):
     return r.returncode == 0
 
 
+# ---------------------------------------------------------------- 4.5 从 GitHub 安装
+
+#: 技能仓库
+GITHUB_REPO = "lonyii/skills-gas-change-reason"
+CODE_ZIP = "https://codeload.github.com/%s/zip/refs/heads/main" % GITHUB_REPO
+REPO_PAGE = "https://github.com/%s" % GITHUB_REPO
+
+
+def fetch_from_github(dest_dir):
+    """从 GitHub 下载技能源码，解压到 dest_dir，返回技能根目录或 None。"""
+    import tempfile
+    import zipfile
+    try:
+        from urllib.request import Request, urlopen
+    except ImportError:
+        from urllib2 import Request, urlopen
+
+    info("从 GitHub 下载：%s" % REPO_PAGE)
+    tmp = tempfile.mkdtemp(prefix="gcr_install_")
+    try:
+        zp = os.path.join(tmp, "skill.zip")
+        try:
+            req = Request(CODE_ZIP, headers={"User-Agent": "gas-change-reason-installer"})
+            with urlopen(req, timeout=120) as resp, open(zp, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+        except Exception as exc:
+            err("下载失败：%s" % exc)
+            err("请检查网络，或手动下载：%s" % REPO_PAGE)
+            return None
+
+        try:
+            with zipfile.ZipFile(zp) as z:
+                names = [n for n in z.namelist() if n and not n.startswith("__MACOSX")]
+                roots = set(n.split("/")[0] for n in names)
+                if len(roots) != 1:
+                    err("压缩包结构异常")
+                    return None
+                root = roots.pop()
+                for n in names:
+                    rel = n[len(root):].lstrip("/")
+                    if not rel:
+                        continue
+                    dest = os.path.join(dest_dir, rel.replace("/", os.sep))
+                    if n.endswith("/"):
+                        if not os.path.isdir(dest):
+                            os.makedirs(dest)
+                        continue
+                    d = os.path.dirname(dest)
+                    if d and not os.path.isdir(d):
+                        os.makedirs(d)
+                    with z.open(n) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+        except zipfile.BadZipFile:
+            err("下载的文件不是有效的 zip 包")
+            return None
+        ok("下载完成")
+        return dest_dir
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -216,6 +280,8 @@ def main():
     ap.add_argument("--archive", default="", help="历史变更单归档目录（多个用 ; 分隔）")
     ap.add_argument("--no-deps", action="store_true", help="跳过依赖安装")
     ap.add_argument("--check-only", action="store_true", help="只做环境体检，不安装")
+    ap.add_argument("--from-github", action="store_true",
+                    help="不依赖本地目录，直接从 GitHub 仓库下载安装")
     args = ap.parse_args()
 
     print("=" * 66)
@@ -233,13 +299,23 @@ def main():
             warn("依赖安装未完全成功，继续安装；若后续报错请手动处理")
         print("")
 
-    # skill 源目录 = 本脚本上级
-    src_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if not os.path.exists(os.path.join(src_root, "SKILL.md")):
-        err("当前目录不是 skill 根目录（缺少 SKILL.md）")
-        return 2
-
     target = args.target or default_skill_dir()
+
+    if args.from_github:
+        # 从 GitHub 下载后再安装
+        import tempfile
+        stage = tempfile.mkdtemp(prefix="gcr_stage_")
+        src_root = fetch_from_github(stage)
+        if not src_root:
+            return 2
+    else:
+        # skill 源目录 = 本脚本上级
+        src_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        if not os.path.exists(os.path.join(src_root, "SKILL.md")):
+            err("当前目录不是 skill 根目录（缺少 SKILL.md）")
+            err("若想直接从仓库安装，请加 --from-github")
+            return 2
+
     skill_dir = copy_skill(src_root, target)
     print("")
 
