@@ -33,6 +33,9 @@
       最终场景仍以名称 + 类别码共同判定。
 """
 
+__author__ = "lonyii"
+__email__ = "lonyii@qq.com"
+
 import re
 
 #: 细分类型代码 → (项目类型名, 归一类别)

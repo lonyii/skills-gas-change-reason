@@ -5,6 +5,16 @@
 
 ---
 
+## 1.2.1 —— 2026-11-10
+
+### 变更
+
+- **补充作者信息**：`lonyii / lonyii@qq.com` 写入 `SKILL.md` frontmatter
+  （`author` / `email`）、`README.md`（标题下作者行与信息表）、`安装说明.txt`，
+  以及 6 个 Python 脚本的 `__author__` / `__email__` 元数据。功能无变化。
+
+---
+
 ## 1.2.0 —— 2026-11-09
 
 ### 新增

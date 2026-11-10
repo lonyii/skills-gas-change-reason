@@ -1,5 +1,7 @@
 # 燃气工程变更原因生成
 
+**作者：lonyii（lonyii@qq.com）**
+
 > **首次安装（二选一）**：
 > ① 把 `gas-change-reason.zip` 交给你的 AI，说一句「帮我安装这个技能包」；
 > ② 只给仓库地址 `https://github.com/lonyii/skills-gas-change-reason`，让 AI 从 GitHub 拉取安装。
@@ -12,6 +14,7 @@
 
 | | |
 |---|---|
+| ✍️ 作者 | lonyii（lonyii@qq.com） |
 | 📦 仓库 | <https://github.com/lonyii/skills-gas-change-reason> |
 | 🔄 自动更新 | `python scripts/fill_change_reason.py update` |
 | 📌 版本 | 见仓库根的 `VERSION` 文件 |

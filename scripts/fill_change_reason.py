@@ -23,6 +23,9 @@
   python fill_change_reason.py update [--check] [--rollback]
 """
 
+__author__ = "lonyii"
+__email__ = "lonyii@qq.com"
+
 import os
 import re
 import sys

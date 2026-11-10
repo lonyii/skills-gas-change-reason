@@ -21,6 +21,9 @@
 """
 from __future__ import print_function
 
+__author__ = "lonyii"
+__email__ = "lonyii@qq.com"
+
 import io
 import json
 import os

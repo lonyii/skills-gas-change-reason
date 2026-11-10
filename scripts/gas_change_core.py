@@ -16,6 +16,9 @@
   - pywin32 (写 .xls，需本机安装 Excel)
 """
 
+__author__ = "lonyii"
+__email__ = "lonyii@qq.com"
+
 import os
 import re
 import sys

@@ -19,6 +19,9 @@
 全程只在缺失时才动手，不会覆盖已有可用依赖。
 """
 
+__author__ = "lonyii"
+__email__ = "lonyii@qq.com"
+
 import os
 import re
 import sys
