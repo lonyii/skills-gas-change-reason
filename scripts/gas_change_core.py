@@ -1082,7 +1082,11 @@ def compose_texts(app_text, qty_text=None, existing_app=""):
     结尾语沿用该文件已有写法（同一单位/同批单据可能用不同变体）。
     """
     app_text = (app_text or "").strip()
-    tail_app = detect_tail(existing_app) or TAIL_APP
+    # 结尾语优先级：新正文自带结尾 > 原单元格既有写法 > 默认句。
+    # --body 传入的润色稿通常自带结尾语，必须优先采用；否则会在其后
+    # 再拼一次原单元格的结尾，形成「…请予以审批；兹提出变更申请单。」。
+    # 自动生成路径的正文不带结尾语，仍沿用原单元格写法。
+    tail_app = detect_tail(app_text) or detect_tail(existing_app) or TAIL_APP
     if app_text.endswith(tail_app):
         app_full = app_text
     else:
@@ -1101,7 +1105,7 @@ def compose_texts(app_text, qty_text=None, existing_app=""):
     return app_full, qty_full
 
 
-def fill_orders(path, items, overwrite=False, backup=True, backup_dir=None):
+def fill_orders(path, items, overwrite=False, backup=False, backup_dir=None):
     """按单据写入变更原因（一次 Excel 会话写完全部 sheet）。
 
     items: [{
@@ -1152,7 +1156,7 @@ def fill_orders(path, items, overwrite=False, backup=True, backup_dir=None):
 
 
 def fill_reason(path, app_text, qty_text=None, overwrite=False,
-                order_index=0, backup=True, backup_dir=None):
+                order_index=0, backup=False, backup_dir=None):
     """把变更原因写入一张变更单的申请单与工程量变更单两个位置。
 
     app_text   : 申请单「设计变更原因」正文（不含结尾语亦可，脚本会补全）
@@ -1162,7 +1166,7 @@ def fill_reason(path, app_text, qty_text=None, overwrite=False,
                  通用文案覆盖掉人工写好的真实原因。
                  True——允许覆盖（CLI 的 --body 参数即视为授权）。
     order_index: 该工作簿内的第几张变更单（0 起）。多张变更单时必须逐张指定。
-    backup     : 写入前是否自动备份原件（默认是）。
+    backup     : 写入前是否备份原件（默认否；CLI 指定 --backup-dir 时开启）。
 
     返回 (ok, cells, slots, backup_path)
     """

@@ -383,7 +383,7 @@ def cmd_fill(args):
 
         res = fill_orders(path, items,
                           overwrite=bool(args.body) or args.overwrite,
-                          backup=not args.no_backup,
+                          backup=bool(args.backup_dir) and not args.no_backup,
                           backup_dir=args.backup_dir or None)
 
         if res["skipped"]:
@@ -724,8 +724,10 @@ def main():
                    help="只处理该文件中的第 N 张变更单（1 起）")
     p.add_argument("--overwrite", action="store_true",
                    help="授权覆盖已有原因（--body 本身即授权）")
-    p.add_argument("--no-backup", action="store_true", help="写入前不备份原件")
-    p.add_argument("--backup-dir", default="", help="备份目录（默认原件同级 _变更单备份）")
+    p.add_argument("--no-backup", action="store_true",
+                   help="显式关闭备份（默认已关闭；用于覆盖 --backup-dir）")
+    p.add_argument("--backup-dir", default="",
+                   help="备份目录；指定后才开启备份（默认不生成备份文件）")
     p.set_defaults(func=cmd_fill)
 
     p = sub.add_parser("reindex", help="重建历史语料库")
