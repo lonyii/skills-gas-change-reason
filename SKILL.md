@@ -1,6 +1,6 @@
 ---
 name: gas-change-reason
-version: 1.2.2
+version: 1.2.3
 display_name: 燃气工程变更原因生成
 description: "为南昌燃气工程设计变更单自动生成『变更原因』文案。当用户给出只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表中每张单据的两个 [变更原因] 单元格（申请单 + 工程量变更单）。支持一个文件内多张变更单（跨 sheet 或同一 sheet 纵向多张）、目录批量、同项目历史定稿复用、默认不生成备份文件（--backup-dir 可主动开启）。"
 author: lonyii
@@ -51,6 +51,8 @@ repository: https://github.com/lonyii/skills-gas-change-reason
    app.DisplayAlerts = False
    app.AutomationSecurity = 1          # msoAutomationSecurityLow，允许运行宏
    wb = app.Workbooks.Open(xls_path)
+   app.CalculateFullRebuild()
+   wb.Worksheets("2-汇总").Activate()   # 关键：必须先激活「2-汇总」，否则变更单材料区只有零散单位/数字、无材料名称
    app.Run("'%s'!CreateBianGengdan" % os.path.basename(xls_path))
    wb.Save()
    wb.Close()
