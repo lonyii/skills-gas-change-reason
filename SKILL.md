@@ -1,8 +1,8 @@
 ---
 name: gas-change-reason
-version: 1.2.3
+version: 1.3.0
 display_name: 燃气工程变更原因生成
-description: "为南昌燃气工程设计变更单自动生成『变更原因』文案。当用户给出只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表中每张单据的两个 [变更原因] 单元格（申请单 + 工程量变更单）。支持一个文件内多张变更单（跨 sheet 或同一 sheet 纵向多张）、目录批量、同项目历史定稿复用、默认不生成备份文件（--backup-dir 可主动开启）。"
+description: "为南昌燃气工程设计变更单自动生成『变更原因』文案，并把材料平差的『生成变更单』环节从 VBA 宏改为 Python 脚本。当用户给出只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用；也需要『跑宏生成变更单』『生成广联达/神机导入表』时使用（bgd_toolkit.py 完整复刻 CreateBianGengdan / Xls2Gldon / Xls2Shenjims，套价数据库走 JSON 缓存）。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表中每张单据的两个 [变更原因] 单元格（申请单 + 工程量变更单）。"
 author: lonyii
 email: lonyii@qq.com
 agent_created: true
@@ -22,6 +22,7 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 > 🔄 自动更新：`python scripts/fill_change_reason.py update`（检查：`update --check`）
 > 语料来源：`E:\2024\2024结算相关\1.材料平差\设计变更\hk`（136 份历史设计变更单）
 > 能力：**Applier 型**——输入变更单 → 输出并写入规范化的变更原因
+> 🧩 配套：`scripts/bgd_toolkit.py` 完整替代材料平差表里的 VBA 宏（生成变更单 / 广联达导入 / 神机导入）
 
 ## 这是什么
 
@@ -42,32 +43,86 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 当用户提供**施工图与竣工图 DWG** 并要求出变更单时，本技能是**最后一步**，不得跳步或颠倒：
 
 1. **先调用 `dwg-material-to-xls` 技能**（仓库：<https://github.com/lonyii/skills-dwg-material-to-xls>；本机未安装则先按其安装说明安装），由两份 DWG 生成材料平差表 `.xls`。
-2. **再在材料平差表中运行内嵌 VBA 宏 `Sub CreateBianGengdan()`**，生成变更单。宏已内嵌在材料平差模板（`assets/template_summary.xls`）中，无需另找 `.bas` 文件；通过 Excel COM 调用：
+2. **再运行 `scripts/bgd_toolkit.py` 生成变更单**（原 VBA 宏 `CreateBianGengdan` 已完整改写成 Python，**不再需要运行宏、不再需要开宏安全性**）：
 
-   ```python
-   import os, win32com.client
-   app = win32com.client.DispatchEx("Excel.Application")
-   app.Visible = False
-   app.DisplayAlerts = False
-   app.AutomationSecurity = 1          # msoAutomationSecurityLow，允许运行宏
-   wb = app.Workbooks.Open(xls_path)
-   app.CalculateFullRebuild()
-   wb.Worksheets("2-汇总").Activate()   # 关键：必须先激活「2-汇总」，否则变更单材料区只有零散单位/数字、无材料名称
-   app.Run("'%s'!CreateBianGengdan" % os.path.basename(xls_path))
-   wb.Save()
-   wb.Close()
-   app.Quit()
+   ```bash
+   python scripts/bgd_toolkit.py bgd "<材料平差.xls>"
+   # 产物：同工作簿里新增「<编号>-变更单打印」，共用「2-汇总」的数据
    ```
+
+   脚本做的事与宏逐格等价：从「2-汇总」读 J 列（变量）、K/L（增加材料/增加数量）、M/N（减少材料/减少数量）
+   取变更量 → 复制 `@变更单EXCEL模板` 副本 → 按条数选模板（容量够用且最小：≤40 用模板5，
+   ≤48 用模板1，≤71 用模板3，更多则模板3 多页）→ 删多余模板对 → 分栏分页填充 → 设打印区域与分页符
+   → 精简物料描述、去公式 → 表名 `Right((YYMMDD&HHMMSS)/19901015,3) & "-变更单打印"`。
+
+   数据前置条件（与宏一致）：**处理的是「2-汇总」这张表**；`--sheet` 可指定别的表名。
+   宏要求先 `Worksheets("2-汇总").Activate()` + `CalculateFullRebuild()`，Python 版已内置
+   （直接按表名取源表，不再依赖 ActiveSheet），这一步不用再手动做。
 
 3. **最后使用本技能**为生成的变更单填写变更原因：`analyze` 预览 → `fill` 写入；若目标单元格已有用户草稿，走 `polish` → `fill --body` 回写。
 
 > 中间产物（DWG 实体缓存、核对报告、临时 xls）不要写入用户工程目录；工程目录只放原始图纸与最终成品。
+
+### `bgd_toolkit.py` 的四个子命令
+
+| 命令 | 等价的原宏 | 作用 |
+|---|---|---|
+| `bgd` | `CreateBianGengdan` | 生成「*-变更单打印」（**本流程第 2 步用的就是它**） |
+| `gldon` | `Xls2Gldon` | 生成「广联达导入」表（按华润定额库匹配定额名称/编码/单价） |
+| `shenji` | `Xls2Shenjims` | 生成「神机导入」表（不匹配定额库） |
+| `all` | 三者连做 | `--target gldon+shenji+bgd` 组合 |
+| `db` | `LoadX` 的缓存层 | 查看/重建 `xchange_cache.json` |
+
+```bash
+python scripts/bgd_toolkit.py gldon  "<材料平差.xls>"    # 广联达导入
+python scripts/bgd_toolkit.py shenji "<材料平差.xls>"    # 神机导入
+python scripts/bgd_toolkit.py all    "<材料平差.xls>" --target gldon+shenji+bgd
+python scripts/bgd_toolkit.py bgd    "<材料平差.xls>" --no-save   # 只预览不落盘
+python scripts/bgd_toolkit.py db                                   # 看缓存状态
+python scripts/bgd_toolkit.py db --rebuild                         # 强制重建
+```
+
+### 套价数据库：JSON 缓存（默认直读，源文件更新自动重建）
+
+原宏每次都要用另一个 Excel 实例打开 `F:\Scripts\Xchange\XchangeSheet.xls`（3.9 MB），
+光是读「替换表 + 数据库」就要好几秒。现在改为 **JSON 缓存**：
+
+- 缓存文件 `scripts/xchange_cache.json`（约 0.60 MB，替换规则 253 条 / 定额 5069 行 / 分隔符 20 条）
+- **加载耗时 ~10ms**（原来每次开 Excel 读 .xls 要数秒）
+- **默认直接读缓存**，不需要 `.xls` 在场也能跑
+- **源文件一改就自动重建**：记录源文件的 路径 + 大小 + 修改时间，任一不同即重建（原子写 `.tmp` → `os.replace`）；源文件缺失时静默沿用旧缓存
+- 源路径解析顺序：`--xchange` 参数 → `scripts/config.json` 的 `xchange_file` → 环境变量 `GAS_XCHANGE_FILE` → `F:\Scripts\Xchange\XchangeSheet.xls` → `scripts/XchangeSheet.xls`
+- 想强制刷新：`python scripts/xchange_db.py build`（或 `bgd_toolkit.py db --rebuild`）
+
+> 缓存只是加速层，**读的仍是同一份数据**：`simplify()` / `normalize()` / `quota_row()` 的结果与宏里
+> `XChange` / `ReplaceX` / `HrdeX` 一致（已逐字符串抽查验证）。
+
+### 与 VBA 宏的等价性（已逐格验证）
+
+| 功能 | 验证方式 | 结果 |
+|---|---|---|
+| `CreateBianGengdan` | 6 组用例（9/32/56/74/83/172 条，覆盖 1/2/3 页）＋1 组带图纸工程量 | **逐格 0 差异**，含打印区域、分页符数量 |
+| `Xls2Gldon` | 4 组用例（含图纸工程量与三种定额版本分支） | **逐格 0 差异** |
+| `Xls2Shenjims` | 同上 4 组 | **逐格 0 差异** |
+
+模板文件本身**不被修改**：脚本只在运行时复制一份 `@变更单EXCEL模板` 工作表再操作副本，
+`assets/template_summary.xls` 与其内嵌 VBA 模块保持原样。
+
+> 迁移时踩到并已规避的 pywin32 后期绑定坑（二次开发请勿改回）：
+> `Range.Value = 二维数组`、`Worksheet.Copy(After=...)`、`Worksheets.Add(After=...)`、
+> `Rows.Insert(Shift=...)`、`Columns.Delete(Shift=...)` 用**关键字或数组**都会**静默失效**，
+> 必须位置传参 / 逐格写；`Cells.Find` 同理必须按 9 个位置参数传。
+
+
 
 ## 快速开始
 
 ```bash
 # 0) 一键安装（自动装依赖 + 装到 skills 目录 + 配置归档 + 自检）
 python scripts/install.py
+
+# 0.5) 材料平差表还没有变更单时：先跑脚本生成（替代原来的 VBA 宏）
+python scripts/bgd_toolkit.py bgd "<材料平差.xls>"
 
 # 1) 先分析预览（不写文件；可传一个文件、多个文件或一个目录）
 python scripts/fill_change_reason.py analyze "<变更单.xls>"
@@ -135,7 +190,8 @@ python scripts/fill_change_reason.py update --rollback
 1. 读 `https://raw.githubusercontent.com/lonyii/skills-gas-change-reason/main/VERSION` 取远端版本
 2. 与本地版本比较（按数字分段比，`1.0.10 > 1.0.9`，不做字符串比较）
 3. 有新版则从 `codeload.github.com` 下载仓库快照 zip
-4. 解压到临时目录 → **校验必需文件齐全**（SKILL.md + 4 个核心脚本）
+4. 解压到临时目录 → **校验必需文件齐全**（SKILL.md + 核心脚本，含 v1.3.0 新增的
+   `bgd_toolkit.py` / `xchange_db.py` / `xchange_cache.json`）
 5. 把旧目录移到备份目录 → 复制新版本 → **恢复本地 `config.json`**
 6. 替换失败自动回滚到旧目录
 
@@ -185,7 +241,24 @@ python fill_change_reason.py update
 | `*-变更单打印` | **打印用的变更单**，本技能的目标表 |
 | `4-汇总打印版 (新版)` / `（旧版-作废）` | 汇总打印 |
 | `5-变更估价` | 定额分部分项工程预算表 |
-| `@变更单EXCEL模板` | 空白模板（4 组变更单，每组 44 行） |
+| `@变更单EXCEL模板` | 空白模板：**8 个半套、成对使用**（模板1/2 容量 48、模板3/4 容量 71、模板5/6 容量 40、模板7/8 容量 40），性标记「模板n开始/结束」写在 O 列 |
+
+### 模板选哪一个（`bgd_toolkit.py` 已复刻宏的真实行为）
+
+按条数（含「增加材料：」「减少材料：」两个标签行）选**容量够用且最小**的那半套：
+
+| 条数 | 选模板 | 每页行数 | 页数 |
+|---|---|---|---|
+| ≤ 40 | 模板5（容量 40） | 88 | 1 |
+| 41–48 | 模板1（容量 48） | 88 | 1 |
+| 49–71 | 模板3（容量 71） | 88 | 1 |
+| 72–142 | 模板3 | 88 | 2 |
+| 143–213 | 模板3 | 88 | 3 |
+
+> 注意两点容易踩错：① 模板1/3 的「变更预算」在**相对第 34 行**，模板5 在**相对第 30 行**，
+> 版式不同、不能混；② 宏那段 `If A Or B Or C Or nTemplate = 0` 的效果是
+> 「装得下且比当前选的更小」先命中，**等价于取容量最小的那套**，不是取第一个够用的。
+
 
 `*-变更单打印` 表内含**两张单据**（上下排列）：
 
@@ -427,8 +500,21 @@ python fill_change_reason.py update
 | **一个文件可能有多张单据** | 不能假设「1 个文件 = 1 张变更单」。枚举规则见上文「变更单结构」，`orders()` 返回按 sheet 顺序、sheet 内按锚点顺序排列的清单，`--order N` 定位第 N 张 |
 | **按列判增/减是错的** | 必须按「增加材料:/减少材料:」标签文本判方向，见上文说明 |
 | **返回值变了（v1.2.0）** | `fill_reason()` 现返回 4 元组 `(ok, cells, slots, backup_path)`；`ReasonBuilder.build()` 返回 4 元组 `(正文, 命中因子, refs, 同项目定稿|None)`。旧的两行解包写法会抛 `ValueError` |
+| **pywin32 关键字参数会静默失效**（v1.3.0 移植时踩到） | `Worksheet.Copy(After=...)`、`Worksheets.Add(After=...)`、`Rows.Insert(Shift=...)`、`Columns.Delete(Shift=...)`、`Cells.Find(...)` 用关键字调用会**不报错也不生效**，必须按位置传参（`Copy(None, src)` / `Add(None, after)` / `Insert(-4161, 0)` / `Delete(-4159)` / Find 传 9 个位置参数） |
+| **整块数组赋值也会静默失效** | `Range.Value = 二维元组` 写不进任何格子（单元格仍为空），必须逐格 `ws.Cells(r, c).Value = v`。导出、精简写回都按这个来 |
+| **宏以 ActiveSheet 为源表** | 原宏 `Xls2Gldon` / `Xls2Shenjims` 都读 `ActiveSheet`，跑完第一支再跑第二支会读错表。Python 版一律按表名取「2-汇总」，不再依赖活动表 |
 
 ## 工作流程
+
+### 情形 0：还没有变更单（从材料平差表生成）
+
+```bash
+python scripts/bgd_toolkit.py bgd "<材料平差.xls>"     # 生成「<编号>-变更单打印」
+python scripts/bgd_toolkit.py gldon "<材料平差.xls>"   # 需要广联达导入表时
+python scripts/bgd_toolkit.py shenji "<材料平差.xls>"  # 需要神机导入表时
+```
+
+生成后再走下面的情形 A / B 填变更原因。
 
 ### 情形 A：单元格为空（自动生成）
 
@@ -498,6 +584,16 @@ python scripts/fill_change_reason.py fill "<变更单.xls>" --order 2 --body "<�
 | `search` | `file`、`--order N`（默认 1）、`--top` | 检索相似历史案例 |
 | `doctor` / `reindex` / `update` | `--check` / `--rollback` / `--out` | 环境自检 / 重建语料 / 更新技能 |
 
+`bgd_toolkit.py`（生成变更单 / 导出，替代 VBA 宏）：
+
+| 命令 | 主要参数 | 说明 |
+|---|---|---|
+| `bgd` | `file`、`--sheet`、`--name`、`--out`、`--no-save` | 生成「*-变更单打印」 |
+| `gldon` | `file`、`--sheet`、`--out`、`--no-save` | 生成「广联达导入」 |
+| `shenji` | `file`、`--sheet`、`--out`、`--no-save` | 生成「神机导入」 |
+| `all` | `file`、`--target gldon+shenji+bgd` | 连做多种导出 |
+| `db` | `--rebuild`、`--xchange <XchangeSheet.xls>` | 查看/重建套价数据库 JSON 缓存 |
+
 ## 参考文档
 
 - `references/patterns.md` —— 全部 310 份历史变更原因原文（按因子归类），供人工比对措辞
@@ -517,6 +613,9 @@ python scripts/fill_change_reason.py fill "<变更单.xls>" --order 2 --body "<�
 | `scripts/material_reason.py` | **材料级推理引擎**（核心：材料 → 工程动作） |
 | `scripts/project_code.py` | **工程编号分类映射**（《分类、编码及命名指引》附表1） |
 | `scripts/fill_change_reason.py` | CLI：doctor / analyze / fill / polish / search / reindex / update |
+| `scripts/bgd_toolkit.py` | **VBA 宏的 Python 等价实现**：生成变更单 / 广联达导入 / 神机导入（`bgd` `gldon` `shenji` `all` `db`） |
+| `scripts/xchange_db.py` | 套价数据库 JSON 缓存层：读取/重建缓存 + 精简与定额查询（`build` `status` `simplify` `normalize`） |
+| `scripts/xchange_cache.json` | 套价数据库缓存（约 0.6 MB：替换规则 253 条 / 定额 5069 行 / 分隔符 20 条），脚本默认直读 |
 | `scripts/corpus_cache.json` | 314 份语料缓存 |
 | `scripts/config.example.json` | 归档目录配置模板（复制为 config.json 使用） |
 | `references/patterns.md` | 310 份原因原文，按因子归类 |

@@ -5,6 +5,48 @@
 
 ---
 
+## 1.3.0 —— 2026-11-12
+
+### 新增：VBA 宏 → Python 脚本（不再运行宏）
+
+- **新增 `scripts/bgd_toolkit.py`**，把材料平差表里 `图纸和变更量自动化处理.bas`
+  的业务功能 100% 复刻为 Python：
+  - `CreateBianGengdan` → `bgd`：从「2-汇总」读 J/K/L/M/N 生成「*-变更单打印」
+  - `Xls2Gldon` → `gldon`：生成「广联达导入」（含华润定额匹配与单位换算）
+  - `Xls2Shenjims` → `shenji`：生成「神机导入」
+  - `LoadX` / `XChange` / `XChangeAll` / `ReplaceX` / `HrdeX` / `ifhasNext`
+    分别由缓存层、精简、替换、定额匹配、模板列标记检测承担
+  - 命令：`python scripts/bgd_toolkit.py bgd|gldon|shenji|all|db "<材料平差.xls>"`
+  - **模板文件不被修改**：只在运行时复制 `@变更单EXCEL模板` 工作表再操作副本，
+    `assets/template_summary.xls` 及其内嵌 VBA 模块保持原样
+  - 不再需要 `AutomationSecurity` 开宏、也不再依赖「先激活 2-汇总」——
+    脚本按表名直接取源表，并内置 `CalculateFullRebuild`
+- **新增 `scripts/xchange_db.py` + `scripts/xchange_cache.json`**：套价数据库
+  （`XchangeSheet.xls`：替换表 253 条 / 定额 5069 行 / 分隔符 20 条）转成 JSON 缓存，
+  **加载从数秒降到约 10ms**；脚本默认直读缓存，**源文件（路径/大小/修改时间任一变化）
+  更新后自动重建**，源文件缺失时沿用旧缓存
+- **`SKILL.md` 工作流改写**：第 2 步由「跑 VBA 宏」改为
+  `python scripts/bgd_toolkit.py bgd "<材料平差.xls>"`，补充子命令速查、
+  缓存机制说明、模板容量与选模板规则、以及 8 个半套模板的实际版式差异
+
+### 等价性验证（逐格比对，不是「看着像」）
+
+- `CreateBianGengdan`：6 组用例（9 / 32 / 56 / 74 / 83 / 172 条，覆盖 1 / 2 / 3 页）
+  ＋ 1 组带图纸工程量，参考输出由原始宏跑出 → **逐格 0 差异**，
+  含打印区域（`$A$1:$N$88` / `$A$1:$N$264`）与分页符数量
+- `Xls2Gldon` / `Xls2Shenjims`：4 组用例（含图纸工程量与三种定额版本分支）
+  → **逐格 0 差异**
+
+### 踩坑记录（已写进 SKILL.md，二次开发勿改回）
+
+- pywin32 后期绑定下 `Worksheet.Copy(After=…)`、`Worksheets.Add(After=…)`、
+  `Rows.Insert(Shift=…)`、`Columns.Delete(Shift=…)`、`Cells.Find(…)` 用关键字
+  会**静默失效**（不报错、不生效），必须按位置传参
+- `Range.Value = 二维数组` 同样静默写不进，必须逐格写
+- 原宏以 `ActiveSheet` 为源表，连跑两支导出会读错表；Python 版按表名取源表
+
+---
+
 ## 1.2.3 —— 2026-11-12
 
 ### 修复

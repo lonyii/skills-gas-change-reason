@@ -169,6 +169,35 @@ python fill_change_reason.py update --check
 python fill_change_reason.py update
 ```
 
+### 还没有变更单？先跑脚本生成（不用再跑 VBA 宏）
+
+材料平差表里本来要运行的宏（`CreateBianGengdan` / 广联达 / 神机导出）已全部改写成
+Python，**不用开宏、不用宏安全性**：
+
+```bash
+cd <安装路径>/scripts
+
+# 生成「<编号>-变更单打印」——替代原来的 CreateBianGengdan 宏
+python bgd_toolkit.py bgd "材料平差表.xls"
+
+# 需要广联达 / 神机导入表时
+python bgd_toolkit.py gldon  "材料平差表.xls"
+python bgd_toolkit.py shenji "材料平差表.xls"
+
+# 三个一起做
+python bgd_toolkit.py all "材料平差表.xls" --target gldon+shenji+bgd
+
+# 看套价数据库缓存状态（默认直读缓存，源 XchangeSheet.xls 更新后自动重建）
+python bgd_toolkit.py db
+```
+
+| 要点 | 说明 |
+|---|---|
+| 数据来源 | 「2-汇总」表的 J 列（变量）/ K-L（增加）/ M-N（减少），与宏一致 |
+| 模板 | 只在运行时复制一份 `@变更单EXCEL模板` 工作表，**模板文件本身不动** |
+| 速度 | 套价数据库走 `xchange_cache.json`，加载约 10ms（原来每次要开 Excel 读 3.9MB 的 .xls） |
+| 等价性 | 与宏逐格比对：6 组变更单用例 + 4 组导出用例，全部 0 差异（含打印区域与分页符） |
+
 ### 命令速查
 
 | 命令 | 作用 | 改文件 |
@@ -278,6 +307,9 @@ python fill_change_reason.py fill "变更单.xls" --body "你润色后的正文"
 | `scripts/material_reason.py` | 材料级推理引擎 |
 | `scripts/project_code.py` | 工程编号分类映射 |
 | `scripts/fill_change_reason.py` | 命令行入口 |
+| `scripts/bgd_toolkit.py` | **生成变更单 / 广联达导入 / 神机导入**（替代材料平差表里的 VBA 宏） |
+| `scripts/xchange_db.py` | 套价数据库 JSON 缓存层（读取/重建/精简/定额查询） |
+| `scripts/xchange_cache.json` | 套价数据库缓存（替换规则 253 条 / 定额 5069 行 / 分隔符 20 条） |
 | `scripts/corpus_cache.json` | 历史语料缓存（314 条） |
 | `scripts/config.example.json` | 归档目录配置模板 |
 | `references/patterns.md` | 310 份历史原因原文，按因子归类 |
