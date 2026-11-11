@@ -1,10 +1,8 @@
 ---
 name: gas-change-reason
-version: 1.2.1
+version: 1.1.1
 display_name: 燃气工程变更原因生成
-description: "为南昌燃气工程设计变更单自动生成『变更原因』文案。当用户给出只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表中每张单据的两个 [变更原因] 单元格（申请单 + 工程量变更单）。支持一个文件内多张变更单（跨 sheet 或同一 sheet 纵向多张）、目录批量、同项目历史定稿复用、写入前自动备份。"
-author: lonyii
-email: lonyii@qq.com
+description: "为南昌燃气工程设计变更单自动生成『变更原因』文案。当用户给出一份只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表的两个 [变更原因] 单元格（申请单 B5 + 工程量变更单 A49）。"
 agent_created: true
 homepage: https://github.com/lonyii/skills-gas-change-reason
 repository: https://github.com/lonyii/skills-gas-change-reason
@@ -17,7 +15,6 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 > ② 只给仓库地址 `https://github.com/lonyii/skills-gas-change-reason`，让 AI 从 GitHub 拉取安装。
 > 之后每次把变更单发给它，说「帮我填写这份变更单的变更原因」即可。
 
-> ✍️ 作者：lonyii（lonyii@qq.com）
 > 📦 仓库：<https://github.com/lonyii/skills-gas-change-reason> ｜ 版本：见 `VERSION` 文件
 > 🔄 自动更新：`python scripts/fill_change_reason.py update`（检查：`update --check`）
 > 语料来源：`E:\2024\2024结算相关\1.材料平差\设计变更\hk`（136 份历史设计变更单）
@@ -27,15 +24,37 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 
 一个**只做一件事**的技能：
 
-> 输入「只有变更内容、变更原因为空」的变更单 → 依据 314 份历史变更单的经验，生成规范化的变更原因，并写入 `*-变更单打印` 表中**每一张单据**的 `[变更原因]` 单元格。
-
-一个 Excel 里**可以有多张变更单**：既可能分散在多张 sheet（如「767-变更单打印（地下）」+「857-变更单打印（地上）」），也可能是同一张 sheet 里纵向排了几张。技能会逐张识别、逐张出文、逐张写入。
+> 输入一份「只有变更内容、变更原因为空」的变更单 → 依据 314 份历史变更单的经验，生成规范化的变更原因，并写入 `*-变更单打印` 表的 `[变更原因]` 单元格。
 
 ## 何时使用
 
-- 用户给出一个 `.xls` 变更单（或一个装着多份变更单的目录），其中 `*-变更单打印` 表的变更原因是空的或写着 `[变更原因]`
+- 用户给出一个 `.xls` 变更单，其中 `*-变更单打印` 表的变更原因是空的或写着 `[变更原因]`
 - 用户说「帮我填写变更原因」「生成变更原因」「这个变更单的原因怎么写」
 - 用户要求「根据材料变更内容推断变更原因」
+
+## 从 DWG 到变更原因的完整工作流（强制顺序）
+
+当用户提供**施工图与竣工图 DWG** 并要求出变更单时，本技能是**最后一步**，不得跳步或颠倒：
+
+1. **先调用 `dwg-material-to-xls` 技能**（仓库：<https://github.com/lonyii/skills-dwg-material-to-xls>；本机未安装则先按其安装说明安装），由两份 DWG 生成材料平差表 `.xls`。
+2. **再在材料平差表中运行内嵌 VBA 宏 `Sub CreateBianGengdan()`**，生成变更单。宏已内嵌在材料平差模板（`assets/template_summary.xls`）中，无需另找 `.bas` 文件；通过 Excel COM 调用：
+
+   ```python
+   import os, win32com.client
+   app = win32com.client.DispatchEx("Excel.Application")
+   app.Visible = False
+   app.DisplayAlerts = False
+   app.AutomationSecurity = 1          # msoAutomationSecurityLow，允许运行宏
+   wb = app.Workbooks.Open(xls_path)
+   app.Run("'%s'!CreateBianGengdan" % os.path.basename(xls_path))
+   wb.Save()
+   wb.Close()
+   app.Quit()
+   ```
+
+3. **最后使用本技能**为生成的变更单填写变更原因：`analyze` 预览 → `fill` 写入；若目标单元格已有用户草稿，走 `polish` → `fill --body` 回写。
+
+> 中间产物（DWG 实体缓存、核对报告、临时 xls）不要写入用户工程目录；工程目录只放原始图纸与最终成品。
 
 ## 快速开始
 
@@ -43,18 +62,11 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 # 0) 一键安装（自动装依赖 + 装到 skills 目录 + 配置归档 + 自检）
 python scripts/install.py
 
-# 1) 先分析预览（不写文件；可传一个文件、多个文件或一个目录）
+# 1) 先分析预览（不写文件）
 python scripts/fill_change_reason.py analyze "<变更单.xls>"
-python scripts/fill_change_reason.py analyze "D:\桌面\待办"          # 目录批量
-python scripts/fill_change_reason.py analyze "D:\桌面\待办" --summary # 只看总览，不打印正文
 
-# 2) 确认后写入（默认自动备份；多张单据逐张写，各自写进自己的原因格）
+# 2) 确认后写入
 python scripts/fill_change_reason.py fill "<变更单.xls>"
-python scripts/fill_change_reason.py fill "D:\桌面\待办" --no-backup   # 关掉备份（不建议）
-
-# 3) 只想处理其中某一面单据时
-python scripts/fill_change_reason.py analyze "<变更单.xls>" --detail
-python scripts/fill_change_reason.py fill "<变更单.xls>" --order 2
 
 # 可选：补充现场事实，让原因更准确
 python scripts/fill_change_reason.py fill "<变更单.xls>" \
@@ -64,11 +76,6 @@ python scripts/fill_change_reason.py fill "<变更单.xls>" \
 # 检索相似历史案例
 python scripts/fill_change_reason.py search "<变更单.xls>" --top 8
 ```
-
-> `analyze` 会逐文件列出「变更单 N 张」总览：**每张单据的序号、所在 sheet、工程编号与名称、
-> 增/减材料条数、原因格现状（空缺/已填，含单元格地址）、是否命中同项目历史定稿、
-> 命中的触发因子、是否回落兜底句**。`--detail` 再加材料明细与动作推理，
-> `--summary` 只看总览第一段。
 
 > **环境依赖交给安装脚本**：install.py 会检查 Python 版本、按需 `pip install xlrd pywin32`、
 > 复制到用户级 skills 目录、自动探测历史变更单归档目录并写入 config.json，最后跑 doctor 自检。
@@ -168,32 +175,8 @@ python fill_change_reason.py update
 | 设计变更申请单 | 1–43 行 | **B5**（合并 R5:R7 C1:C14） | `兹提出设计变更申请单，请予以审批。` |
 | 工程量变更单 | 44–75 行 | **A49**（合并 R49:R51 C0:C14） | `兹提出工程量变更单。` |
 
-上表是**最老一版模板**的行位置。实际文件里位置会浮动（见过申请单原因格在 B6、
-工程量单在 A50 的汇总版式），所以技能**不写死行号**，而是运行时定位：
-
-- **单据锚点**：A 列出现「设计变更原因」的那一行 → 一张单据的起点；
-  同一 sheet 里出现第 2 个、第 3 个锚点，就是第 2 张、第 3 张单据（纵向多张）。
-  没有「设计变更原因」的老版式，退化为按「工程量变更单」标题切一块。
-- **申请单原因格**：锚点行往下、col==1 的那块合并区（无合并区则取 (锚点行, 1)）。
-- **工程量单原因格**：单据内「工程量变更单」标题之下、col==0、宽 ≥5 列的合并区里
-  取 `min(rlo)` 那一块（合并区未按行排序，不能按遍历顺序取）。
-- 每张单据的工程编号/工程名称各自向上扫描取得，遇到上一张的锚点行即停，避免串号。
-
-**关键规则**：同一张单据的两处**原因正文完全相同**，仅结尾语不同（历史 314 份中符合此规律者占绝大多数）。
-写入时同一张单据的两处都写；**不同单据之间正文各自独立**，材料与原因格互不串。
-
-### 增/减方向以标签文本为准（重要）
-
-`增加材料:` / `减少材料:` 两个标签**不一定在固定列**：常见版式里两标签分别在 A 列与 H 列，
-也存在整份文件的标签都在 A 列、材料实际是减少项的情况。
-
-> **绝不能按列判断增/减**。技能现在按**标签文本**判定：读到「增加材料:」之后的行算增加，
-> 读到「减少材料:」之后的行算减少，左右两侧各自记状态。
-> 早期版本按列判断（0 列=增、7 列=减），会把「减少材料:」块整块误读成增加项，
-> 进而在正文里写成「故造成…有所增加」——这是最危险的一类错，核对时务必看这条。
->
-> 交叉验证方法：`2-汇总` 的 J 列「变量」= 竣工图数量 − 施工图数量，负数即减少；
-> 变更复制区 M 列为「减少材料:」、N 列为减少数量。
+**关键规则**：两张单据的**原因正文完全相同**，仅结尾语不同（历史 314 份中符合此规律者占绝大多数）。
+写入时必须两处都写。
 
 ## 历史语料规律（已归纳）
 
@@ -297,45 +280,7 @@ python fill_change_reason.py update
 始终保留 pipe_swap（主线动作）
 ```
 
-实测 314 份历史文件全量回归：生成成功率 **314/314**，长度 min/中位/max = **50/73/232**，无一超出历史上限。
-
-### 同项目历史定稿复用（v1.2.0 新增）
-
-同一工程常常先后出过多次变更单，**同项目的历史定稿正文比自己从材料推的准**
-（材料只能证明「改了什么」，证明不了「为什么」；定稿里有「设计管位顶部有蒸汽管道」
-这种现场事实）。因此生成顺序改为：
-
-```
-命中同项目历史定稿 → 以定稿为骨架（剥掉「综上所述」与结尾语），
-                    仅补入本次材料推出、定稿未提及的工程动作 → 补结论句
-                          ↓ 否则
-                    材料级推理（原逻辑）
-                          ↓ 都没有
-                    兜底句
-```
-
-- 同项目判定 `Corpus.project_match()`：**同工程编号** 或 **同归一化工程名称**
-  （去括号/标点、去掉尾部「工程/项目」）。同一编号但名称不同（如「(地下部分)」
-  与「（地上部分）」）**不算同一张单据**，避免上下游段互相串用。
-- 补充动作时**故意排除 `branch_add`**：它的处数由弯头数量推得，容易失真。
-- 复用正文超过 234 字时，逐个弹出补充分句，定稿骨架始终保留。
-- `analyze` 会明确打出「同项目历史定稿」原文，并注明「本次正文沿用该口径」。
-
-### 兜底句（未命中任何因子时）
-
-材料推不出动作时不能硬编。兜底句按**场景**分化（`material_reason.fallback_clause`）：
-
-| 场景 | 兜底句 |
-|---|---|
-| 室内（厨房/食堂/车间/锅炉房/厂区/商业区…） | 因{场景}设备及设施较多，需根据现场实际情况调整管位，并增加管件绕行避让障碍… |
-| 室外且知道位置（`--location`） | 该工程位于{位置}，地下管线及其他设施较多，需调整敷设位置并绕行… |
-| 其余 | 通用句 |
-
-> 早期版本对室内厨房、食堂调压器迁改也套「地下管线较多，需调整敷设位置并绕行」，
-> 对室内工程是完全错误的归因。现在室内场景不会再出现「地下管线」措辞。
->
-> `analyze` 对回落兜底句的单据打 **⚠** 标记并在末尾汇总「兜底句 N 张」，
-> 提醒人工核校或补 `--location/--extra/--body`。
+实测 314 份历史文件全量回归：生成成功率 **314/314**，长度 min/中位/max = **50/82/229**，无一超出历史上限。
 
 ### 场景推断
 
@@ -391,39 +336,22 @@ python fill_change_reason.py update
 
 | 坑 | 说明 |
 |---|---|
-| **xlrd 不能写 .xls** | 写入必须走 Excel COM（`pywin32` + 本机 Excel）。多张单据、多张 sheet 时用**一次 COM 会话**按 sheet 归并写入（`ExcelWriter.write_many`），避免反复开关工作簿 |
+| **xlrd 不能写 .xls** | 写入必须走 Excel COM（`pywin32` + 本机 Excel）。脚本用「复制到临时文件 → 改 → 覆盖原文件」避免 Excel 独占锁损坏原文件 |
 | **merged_cells 未按行排序** | 定位工程量变更单槽位**不能依赖遍历顺序**，必须取标题行之下 `min(rlo)` 的整行合并区 |
 | **材料区会读到签字栏** | 材料提取必须以 A 列出现「变更预算」为结束标志，否则会把「预算人员(签字)」当成材料 |
 | **xlrd 需 `formatting_info=True`** | 否则读不到 `merged_cells` |
 | **MCP 通道打不开 .xls** | sheetagent 的 `resolve_local_excel` 对本机 D 盘路径会丢盘符，且老格式解析失败——本技能统一走 Python |
-| **写前安全校验** | 目标单元格若已有非占位符内容，**自动生成模式直接中止**并报错；只有显式 `--body`/`--overwrite` 才授权覆盖 |
-| **写入自动备份**（v1.2.0 起） | 覆盖前自动复制到原件同级 `_变更单备份\`，文件名 `<原名>.<YYYYmmdd_HHMMSS>.bak.xls`；`--no-backup` 关闭、`--backup-dir` 改位置。备份目录与 `.bak.` 文件会被语料扫描和批量收集自动跳过，不会重复计数 |
-| **一个文件可能有多张单据** | 不能假设「1 个文件 = 1 张变更单」。枚举规则见上文「变更单结构」，`orders()` 返回按 sheet 顺序、sheet 内按锚点顺序排列的清单，`--order N` 定位第 N 张 |
-| **按列判增/减是错的** | 必须按「增加材料:/减少材料:」标签文本判方向，见上文说明 |
-| **返回值变了（v1.2.0）** | `fill_reason()` 现返回 4 元组 `(ok, cells, slots, backup_path)`；`ReasonBuilder.build()` 返回 4 元组 `(正文, 命中因子, refs, 同项目定稿|None)`。旧的两行解包写法会抛 `ValueError` |
+| **写前安全校验** | 目标单元格若已有非占位符内容，**自动生成模式直接中止**并报错；只有显式 `--body` 才授权覆盖 |
+| **不生成备份** | 写入直接覆盖原文件，不留 `.备份.xls` 副本；覆盖前会在 stderr 打印告警 |
 
 ## 工作流程
 
 ### 情形 A：单元格为空（自动生成）
 
 ```bash
-python scripts/fill_change_reason.py analyze "<变更单.xls>"   # 先预览（不落盘）
-python scripts/fill_change_reason.py fill    "<变更单.xls>"   # 再写入（自动备份）
+python scripts/fill_change_reason.py analyze "<变更单.xls>"   # 先预览
+python scripts/fill_change_reason.py fill    "<变更单.xls>"   # 再写入
 ```
-
-批量（一个目录或一次给多个文件）：
-
-```bash
-python scripts/fill_change_reason.py analyze "D:\桌面\待办" --summary
-python scripts/fill_change_reason.py fill    "D:\桌面\待办"
-```
-
-多张单据：`analyze` 先把每张单据列出来（序号/sheet/编号/名称/现状/因子），
-确认无误后 `fill` 逐张写；只想动某一张时加 `--order N`。
-
-> **注意**：`fill` 遇到已有内容的单据**会跳过该张**（`结果: 跳过`），不会中止整个文件；
-> 要覆盖请显式 `--overwrite`（或 `--body`）。多张单据时 `--body` 必须与 `--order` 同用，
-> 否则一律跳过——否则同一段正文会被贴到不该贴的那张单据上。
 
 ### 情形 B：单元格已有用户草稿（AI 润色）
 
@@ -432,11 +360,11 @@ python scripts/fill_change_reason.py fill    "D:\桌面\待办"
 
 ```bash
 # 1) 取润色素材包（草稿 + 材料变动 + 推导动作 + 相关历史案例 + 文风规范）
-python scripts/fill_change_reason.py polish "<变更单.xls>" --order 2
+python scripts/fill_change_reason.py polish "<变更单.xls>"
 
 # 2) AI 参照素材包润色，保留草稿中的现场事实，只改措辞
-# 3) 写回润色结果（多张单据时必须带 --order）
-python scripts/fill_change_reason.py fill "<变更单.xls>" --order 2 --body "<润色后的正文>"
+# 3) 写回润色结果
+python scripts/fill_change_reason.py fill "<变更单.xls>" --body "<润色后的正文>"
 ```
 
 `polish` 输出的素材包含 6 部分：
@@ -451,26 +379,15 @@ python scripts/fill_change_reason.py fill "<变更单.xls>" --order 2 --body "<�
 >
 > | 场景 | 命令 | 行为 |
 > |---|---|---|
-> | 目标格为空 | `fill` | 自动生成并写入（逐张单据） |
-> | 目标格已有内容 | `fill`（无 `--body`/`--overwrite`） | **跳过该张**并提示改走 polish 流程 |
-> | 目标格已有内容 | `polish --order N` → `fill --order N --body "<润色结果>"` | 授权覆盖 |
+> | 目标格为空 | `fill` | 自动生成并写入 |
+> | 目标格已有内容 | `fill`（无 `--body`） | **中止**并提示改走 polish 流程 |
+> | 目标格已有内容 | `polish` → `fill --body "<润色结果>"` | 授权覆盖，stderr 打印告警 |
 >
-> **写入前自动备份**（v1.2.0 起）：原文件先复制到同级 `_变更单备份\`，
-> 再就地覆盖；备份失败则中止写入。`--no-backup` 可关闭，`--backup-dir` 可指定目录。
+> **写入直接覆盖原文件，不生成备份副本**；覆盖时会在 stderr 打印告警，提示原内容将永久替换。
 >
 > ⚠️ 这条中止规则依赖 `fill_reason(..., overwrite=...)` 的显式标志，
 > 不能改回「按是否传了文本来判断」——CLI 的自动生成路径**始终**会传文本，
 > 那样判断会永远为真，保护形同虚设。
-
-## 命令行速查
-
-| 命令 | 主要参数 | 说明 |
-|---|---|---|
-| `analyze` | `files…`（文件/目录，可多个）、`--summary`、`--detail`、`--location`、`--extra` | 只读预览；逐文件列「变更单 N 张」，逐张打印两处正文 |
-| `fill` | `files…`、`--order N`、`--body`、`--overwrite`、`--no-backup`、`--backup-dir`、`--location`、`--extra` | 逐张生成并写入；默认备份 |
-| `polish` | `file`、`--order N`（默认 1）、`--top` | 输出润色素材包 |
-| `search` | `file`、`--order N`（默认 1）、`--top` | 检索相似历史案例 |
-| `doctor` / `reindex` / `update` | `--check` / `--rollback` / `--out` | 环境自检 / 重建语料 / 更新技能 |
 
 ## 参考文档
 
