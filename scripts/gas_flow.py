@@ -11,6 +11,15 @@
 3. **默认就地**：所有改动（新增变更单 sheet + 变更原因）都写回同一份材料平差表，
    不额外生成「变更单 xls 文件」。只有显式 `--standalone` 才导出只含变更单的独立文件。
 4. 三步顺序不变：材料平差 → 变更单 → 变更原因。
+5. **已有原因先看结尾语**：变更单原因已填时，按结尾语判定是否标准格式——
+   - 全部是标准结尾语 → 「无需处理」，正常退出（rc=0）；
+   - 有非标准结尾语 → 逐张输出 polish 润色素材包，提示 AI 润色后用
+     `fill --body` 回写，并返回退出码 10（表示「需 AI 润色」）。
+
+退出码
+------
+    0  成功 / 无需处理        2  输入或流程错误
+    10 检测到非标准格式原因，需 AI 润色后 fill --body 回写
 
 用法
 ----
@@ -46,6 +55,25 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DWG_EXT = (".dwg", ".dxf")
 XLS_EXT = (".xls", ".xlsx", ".xlsm")
 CHANGE_SHEET_MARK = "变更单打印"
+
+# 退出码：需 AI 润色（非标准格式原因）
+RC_NEED_POLISH = 10
+
+# 合法结尾语：申请单（含各变体）、工程量变更单、罕见笔误变体。
+# 与 gas_change_core 保持一致；判定只读结尾，宽松（用户口径 2026-11-12）。
+_TAIL_APP = "兹提出设计变更申请单，请予以审批。"
+_TAIL_APP_VARIANTS = [
+    "兹提出设计变更申请单，请予以审批。",
+    "兹提出变更申请单，请予以审批。",
+    "兹提出变更单申请，请予以审批。",
+    "兹提出工程量变更申请单，请予以审批。",
+    "兹提出设计变更清单，请予以审批。",
+    "综上所述，兹提出变更申请单，请审批。",
+    "兹提出变更申请单，请审批。",
+]
+_TAIL_QTY = "兹提出工程量变更单。"
+_TAIL_RARE = "拟调整如下材料，兹提出变更申请单。"
+_VALID_TAILS = tuple(_TAIL_APP_VARIANTS) + (_TAIL_QTY, _TAIL_RARE, "兹提出变更申请单。")
 
 
 def out(msg):
@@ -113,6 +141,65 @@ def sheet_names(path):
 
 def has_change_sheet(path):
     return any(CHANGE_SHEET_MARK in n for n in sheet_names(path))
+
+
+def is_standard_tail(text, detect=None):
+    """仅按结尾语判定原因是否标准格式（用户口径 2026-11-12：只看结尾语）。
+
+    去掉尾部空白后，以任一合法结尾语收尾即为标准；否则非标准。
+    detect 为 gas_change_core.detect_tail 时一并使用，兼容更多历史变体。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return False
+    if s.endswith(_VALID_TAILS):
+        return True
+    return bool(detect(s)) if detect else False
+
+
+def scan_reason_states(path):
+    """扫描工作簿中每张变更单的原因填写状态。
+
+    返回 (states, stats)：
+      states: [{seq, sheet, code, name, app, qty, has_draft, standard}, ...]
+              seq 与 polish/fill 的 --order 一致（1 起）。
+      stats:  {total, empty, standard, nonstandard}
+    import 失败或解析异常时返回 (None, None)，让调用方回退到原 fill 流程。
+    """
+    try:
+        sys.path.insert(0, HERE)
+        from gas_change_core import ChangeOrder, PLACEHOLDER, detect_tail
+        co = ChangeOrder(path)
+        orders = co.orders()
+    except Exception as exc:  # 核心库缺失/格式异常 → 回退原流程
+        err("原因状态扫描失败，回退到原 fill 流程：%s" % exc)
+        return None, None
+    if not orders:
+        return None, None
+
+    states = []
+    for o in orders:
+        app = (o.get("draft_app") or "").strip()
+        qty = (o.get("draft_qty") or "").strip()
+        # 占位符视为未填（兼容「[变更原因]（工程量）」等带后缀的模板变体）
+        app = "" if PLACEHOLDER in app else app
+        qty = "" if PLACEHOLDER in qty else qty
+        has_draft = bool(app or qty)
+        # 有内容的每个格都必须是标准结尾语，整张才算标准；空视为待填不算非标准
+        filled_texts = [t for t in (app, qty) if t]
+        standard = bool(filled_texts) and all(is_standard_tail(t, detect_tail) for t in filled_texts)
+        states.append({
+            "seq": o["seq"], "sheet": o["sheet"],
+            "code": o.get("code", ""), "name": o.get("name", ""),
+            "app": app, "qty": qty,
+            "has_draft": has_draft, "standard": standard,
+        })
+
+    empty = sum(1 for s in states if not s["has_draft"])
+    standard = sum(1 for s in states if s["has_draft"] and s["standard"])
+    nonstandard = sum(1 for s in states if s["has_draft"] and not s["standard"])
+    return states, {"total": len(states), "empty": empty,
+                    "standard": standard, "nonstandard": nonstandard}
 
 
 def expand_inputs(inputs):
@@ -265,6 +352,33 @@ def main(argv):
 
     # ---- 最后一步：填变更原因
     out("[3/3] 填写变更原因")
+
+    # 已有原因先看结尾语：标准→无需处理；非标准→逐张输出润色素材包交给 AI
+    states, stats = scan_reason_states(work)
+    if stats and stats["nonstandard"]:
+        bad = [s for s in states if s["has_draft"] and not s["standard"]]
+        out("[分流] %d 张原因已填但结尾语非标准，进入润色流程：" % len(bad))
+        for s in bad:
+            out("  · 第%d张[%s] %s %s" %
+                (s["seq"], s["sheet"], s["code"] or "-", s["name"] or "-"))
+        for s in bad:
+            out("")
+            run([py, fill_tool, "polish", work, "--order", str(s["seq"])],
+                "第%d张 润色素材包" % s["seq"])
+        out("")
+        out("[需润色] 请参照上面的素材包把非标准原因润色成规范文案（保留现场事实），")
+        out("         然后逐张回写：")
+        for s in bad:
+            out("  python fill_change_reason.py fill \"%s\" --order %d --body \"<润色后的正文>\""
+                % (work, s["seq"]))
+        out("[退出码 %d] 需 AI 润色后回写，原因格尚未改动。" % RC_NEED_POLISH)
+        return RC_NEED_POLISH
+
+    if stats and stats["standard"] and not stats["empty"] and not stats["nonstandard"]:
+        out("[INFO] %d 张变更单原因均已填且为标准结尾语，无需处理。" % stats["standard"])
+        return 0
+
+    # 其余情况（全空 / 部分空缺）→ 正常 fill，已填的由 fill 自动跳过
     cmd = [py, fill_tool, "fill", work]
     for flag, key in (("--extra", "extra"), ("--location", "location")):
         if args[key]:
