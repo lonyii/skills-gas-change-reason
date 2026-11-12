@@ -46,6 +46,7 @@ XL_NORMAL_VIEW = 1
 XL_PAGE_BREAK_PREVIEW = 2
 
 TEMPLATE_SHEET = "@变更单EXCEL模板"
+CHANGE_MARK = "变更单打印"
 GDLD_SHEET = "广联达导入"
 SHENJI_SHEET = "神机导入"
 CVER = "VER - 2026.11.08 by ACECKT"
@@ -418,6 +419,26 @@ def _clear_or_add_sheet(wb, name, after_src):
 
 # ------------------------------------------------------------------ 变更单
 
+def export_sheet_to_file(app, wb, sheet_name, out_path):
+    """把已有变更单 sheet 复制到独立 .xls；原工作簿不改动。
+
+    pywin32 后期绑定下 Copy(Before=..., After=...) 的关键字写法会静默失效，
+    必须按位置传参；Range.Value = 二维数组同理，故逐格写由调用方负责。
+    """
+    ws = wb.Worksheets(sheet_name)
+    new_wb = app.Workbooks.Add()
+    try:
+        first = new_wb.Worksheets(1)
+        ws.Copy(None, first)
+        for sh in list(new_wb.Worksheets):
+            if sh.Name != ws.Name:
+                sh.Delete()
+        new_wb.SaveAs(os.path.abspath(out_path), 56)
+        # 56 = xlExcel8；新建工作簿默认会存成 xlsx，扩展名 .xls 会骗过后续 xlrd
+    finally:
+        new_wb.Close(SaveChanges=False)
+
+
 def _template_marks(ws):
     """扫描「@变更单EXCEL模板」里的 模板n开始/结束 标记，返回 (列表, 列数)。"""
     items = []
@@ -468,7 +489,8 @@ def _collect_items(src):
     return add, reduce
 
 
-def create_change_order(db, wb, src, name=None, out_path=None):
+def create_change_order(db, wb, src, name=None, out_path=None,
+                        standalone=False, app=None):
     """等价 ``CreateBianGengdan``：生成「*-变更单打印」。
 
     返回 (表名, 写入了多少条材料) 或 (None, 0)（无变更量）。
@@ -605,6 +627,9 @@ def create_change_order(db, wb, src, name=None, out_path=None):
     _replace(ws.Cells, "`", "_")
     ws.UsedRange = ws.UsedRange.Value
 
+    if standalone and out_path and app:
+        export_sheet_to_file(app, wb, dst_name, out_path)
+        return dst_name, total
     if out_path:
         wb.SaveAs(os.path.abspath(out_path))
     return dst_name, total
@@ -754,10 +779,13 @@ USAGE = """用法：
   python bgd_toolkit.py gldon  <材料平差.xls> [--sheet 2-汇总] [--out 另存.xls]
   python bgd_toolkit.py shenji <材料平差.xls> [--sheet 2-汇总] [--out 另存.xls]
   python bgd_toolkit.py all    <材料平差.xls> [--target gldon+shenji+bgd] [--out 另存.xls]
+  python bgd_toolkit.py export <材料平差.xls> --out <独立变更单.xls> [--sheet 表名]
   python bgd_toolkit.py db     [--rebuild] [--xchange <XchangeSheet.xls>]
 
 说明：
-  · 默认就地保存：不加 --out 时，结果写回原 .xls（与宏一样在同一个工作簿里加表）
+  · 默认就地保存：结果写回原 .xls（在同一个工作簿里新增 sheet），不另建变更单文件
+  · --standalone：只有显式要求时才导出只含变更单的独立 .xls（原文件不动）
+  · export：把文件里已有的变更单 sheet 导出成独立 .xls（原文件不动）
   · 加 --no-save 只预览、不落盘
   · 套价数据库走 scripts/xchange_cache.json 缓存（加载 ~10ms）；源 .xls 路径、大小或
     修改时间任意一项变了，下一次运行会自动重建缓存
@@ -805,16 +833,41 @@ def main(argv):
         print("缺少变更单文件（.xls）")
         return 2
 
+    # ---- export：把已有变更单 sheet 导成独立 .xls（原文件不动）
+    if cmd == "export":
+        dst_out = _opt(args, "--out")
+        if not dst_out:
+            print("export 需要 --out <独立变更单.xls>")
+            return 2
+        with Session(path) as s:
+            dst = _opt(args, "--sheet")
+            if not dst:
+                for sh in s.wb.Worksheets:
+                    if CHANGE_MARK in sh.Name:
+                        dst = sh.Name
+                        break
+            if not dst:
+                print("[INFO] 没有找到变更单 sheet，未导出")
+                return 0
+            export_sheet_to_file(s.app, s.wb, dst, dst_out)
+            print("[OK] 已导出独立变更单「%s」→ %s" % (dst, dst_out))
+        return 0
+
     sheet = _opt(args, "--sheet")
     out = _opt(args, "--out")
     name = _opt(args, "--name")
     no_save = "--no-save" in args
+    standalone = "--standalone" in args
+    if standalone and not out:
+        base = os.path.splitext(os.path.basename(path))[0]
+        out = os.path.join(os.path.dirname(path), base + "-变更单.xls")
     db = load_quota_db(path=_opt(args, "--xchange"))
 
     with Session(path) as s:
         src = s.source_sheet(sheet)
         if cmd == "bgd":
-            dst, n = create_change_order(db, s.wb, src, name=name, out_path=out)
+            dst, n = create_change_order(db, s.wb, src, name=name, out_path=out,
+                                         standalone=standalone, app=s.app)
             if not dst:
                 print("[INFO]「%s」里没有变更量，未生成变更单" % src.Name)
                 return 0
@@ -838,13 +891,14 @@ def main(argv):
             if "shenji" in targets:
                 print("[OK] 神机导入 %d 条" % export_shenji(db, s.wb, src))
             if "bgd" in targets:
-                dst, n = create_change_order(db, s.wb, src, name=name)
+                dst, n = create_change_order(db, s.wb, src, name=name,
+                                             standalone=standalone, app=s.app)
                 print("[OK] 变更单「%s」%d 条" % (dst, n) if dst else "[INFO] 没有变更量")
         else:
             print(USAGE)
             return 2
 
-        if not no_save and not out:
+        if not no_save and not out and not standalone:
             s.save()
             print("[OK] 已保存：%s" % path)
     return 0

@@ -1,8 +1,8 @@
 ---
 name: gas-change-reason
-version: 1.3.0
+version: 1.4.0
 display_name: 燃气工程变更原因生成
-description: "为南昌燃气工程设计变更单自动生成『变更原因』文案，并把材料平差的『生成变更单』环节从 VBA 宏改为 Python 脚本。当用户给出只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用；也需要『跑宏生成变更单』『生成广联达/神机导入表』时使用（bgd_toolkit.py 完整复刻 CreateBianGengdan / Xls2Gldon / Xls2Shenjims，套价数据库走 JSON 缓存）。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表中每张单据的两个 [变更原因] 单元格（申请单 + 工程量变更单）。"
+description: "为南昌燃气工程设计变更单自动生成『变更原因』文案，并把材料平差的『生成变更单』环节从 VBA 宏改为 Python 脚本。当用户给出只有变更内容（增/减材料清单）但变更原因为空的变更单 .xls，或要求『填写变更原因』『生成变更原因』『根据材料变更推断原因』时使用；也需要『跑宏生成变更单』『生成广联达/神机导入表』时使用（bgd_toolkit.py 完整复刻 CreateBianGengdan / Xls2Gldon / Xls2Shenjims，套价数据库走 JSON 缓存）。基于 314 份历史变更单语料生成符合公司文风的原因，并写入『*-变更单打印』表中每张单据的两个 [变更原因] 单元格（申请单 + 工程量变更单）。新增 gas_flow.py 统一入口：DWG 或平差表皆可输入，已有变更单自动跳过生成；默认写回原平差表，--standalone 才导出独立文件。"
 author: lonyii
 email: lonyii@qq.com
 agent_created: true
@@ -38,12 +38,12 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 - 用户说「帮我填写变更原因」「生成变更原因」「这个变更单的原因怎么写」
 - 用户要求「根据材料变更内容推断变更原因」
 
-## 从 DWG 到变更原因的完整工作流（强制顺序）
+## 多入口工作流（统一入口 gas_flow.py）
 
-当用户提供**施工图与竣工图 DWG** 并要求出变更单时，本技能是**最后一步**，不得跳步或颠倒：
+两种入口（DWG / 材料平差表）都由 `scripts/gas_flow.py` 统一接管，自动判断从哪一步开始；内部三步顺序（材料平差 → 变更单 → 变更原因）不变：
 
 1. **先调用 `dwg-material-to-xls` 技能**（仓库：<https://github.com/lonyii/skills-dwg-material-to-xls>；本机未安装则先按其安装说明安装），由两份 DWG 生成材料平差表 `.xls`。
-2. **再运行 `scripts/bgd_toolkit.py` 生成变更单**（原 VBA 宏 `CreateBianGengdan` 已完整改写成 Python，**不再需要运行宏、不再需要开宏安全性**）：
+2. **再运行 `scripts/bgd_toolkit.py` 生成变更单**（原 VBA 宏 `CreateBianGengdan` 已完整改写成 Python，**不再需要运行宏、不再需要开宏安全性**）。**若平差表里已有 `*-变更单打印`，跳过本步**；默认在原平差表中新增 sheet，**不新建变更单 xls 文件**：
 
    ```bash
    python scripts/bgd_toolkit.py bgd "<材料平差.xls>"
@@ -62,6 +62,26 @@ repository: https://github.com/lonyii/skills-gas-change-reason
 3. **最后使用本技能**为生成的变更单填写变更原因：`analyze` 预览 → `fill` 写入；若目标单元格已有用户草稿，走 `polish` → `fill --body` 回写。
 
 > 中间产物（DWG 实体缓存、核对报告、临时 xls）不要写入用户工程目录；工程目录只放原始图纸与最终成品。
+
+### 统一入口（推荐）
+
+```bash
+# DWG 起点：先转材料平差表 → 生成变更单 → 填原因
+python scripts/gas_flow.py "<施工图.dwg>" "<竣工图.dwg>"
+
+# 材料平差表起点：已有变更单就跳过生成，直接填原因
+python scripts/gas_flow.py "<材料平差.xls>"
+
+# 只有用户明确说「单独生成变更单」时才加 --standalone
+python scripts/gas_flow.py "<材料平差.xls>" --standalone
+```
+
+- **默认写回原平差表**：新增 sheet + 填原因都在同一份 `.xls` 里，不另建变更单文件。
+- **已有变更单**：检测到 `*-变更单打印` 就跳过 `bgd`，直接填原因；`--standalone` 时用
+  `bgd_toolkit.py export` 把已有单据导出为独立文件。
+- `--extra` / `--location` 透传给填原因步骤，`--out-dir` 指定 DWG 转平差的成品目录。
+- DWG 入口需要 `dwg-material-to-xls` 技能已安装；可用环境变量 `GAS_DWG_SKILL_DIR` 指定其目录。
+
 
 ### `bgd_toolkit.py` 的四个子命令
 
@@ -121,8 +141,10 @@ python scripts/bgd_toolkit.py db --rebuild                         # 强制重�
 # 0) 一键安装（自动装依赖 + 装到 skills 目录 + 配置归档 + 自检）
 python scripts/install.py
 
-# 0.5) 材料平差表还没有变更单时：先跑脚本生成（替代原来的 VBA 宏）
-python scripts/bgd_toolkit.py bgd "<材料平差.xls>"
+# 0.5) 统一入口（推荐）：DWG 或材料平差表都能喂，自动判断从哪步开始
+python scripts/gas_flow.py "<施工图.dwg>" "<竣工图.dwg>"
+python scripts/gas_flow.py "<材料平差.xls>"                      # 已有变更单则跳过生成
+python scripts/gas_flow.py "<材料平差.xls>" --standalone         # 只有这时才另出独立变更单 xls
 
 # 1) 先分析预览（不写文件；可传一个文件、多个文件或一个目录）
 python scripts/fill_change_reason.py analyze "<变更单.xls>"
@@ -190,8 +212,7 @@ python scripts/fill_change_reason.py update --rollback
 1. 读 `https://raw.githubusercontent.com/lonyii/skills-gas-change-reason/main/VERSION` 取远端版本
 2. 与本地版本比较（按数字分段比，`1.0.10 > 1.0.9`，不做字符串比较）
 3. 有新版则从 `codeload.github.com` 下载仓库快照 zip
-4. 解压到临时目录 → **校验必需文件齐全**（SKILL.md + 核心脚本，含 v1.3.0 新增的
-   `bgd_toolkit.py` / `xchange_db.py` / `xchange_cache.json`）
+4. 解压到临时目录 → **校验必需文件齐全**（SKILL.md + 核心脚本，含 `bgd_toolkit.py` / `xchange_db.py` / `xchange_cache.json` / `gas_flow.py`）
 5. 把旧目录移到备份目录 → 复制新版本 → **恢复本地 `config.json`**
 6. 替换失败自动回滚到旧目录
 

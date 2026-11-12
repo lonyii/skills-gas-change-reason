@@ -169,7 +169,25 @@ python fill_change_reason.py update --check
 python fill_change_reason.py update
 ```
 
-### 还没有变更单？先跑脚本生成（不用再跑 VBA 宏）
+### 统一入口（推荐，DWG 或平差表都能直接喂）
+
+```bash
+cd <安装路径>/scripts
+
+# 从 DWG 开始：自动转材料平差表 → 生成变更单 → 填变更原因
+python gas_flow.py "<施工图.dwg>" "<竣工图.dwg>"
+
+# 从材料平差表开始：已有变更单就跳过生成，直接填原因
+python gas_flow.py "<材料平差.xls>"
+
+# 只有用户明确说「单独生成变更单」时才导出独立 xls
+python gas_flow.py "<材料平差.xls>" --standalone
+```
+
+默认所有改动都写回**同一份材料平差表**（新增 sheet + 填原因），不另建变更单文件。
+`--out-dir` 可指定 DWG 转平差的成品目录；DWG 入口需要 `dwg-material-to-xls` 技能已安装。
+
+### 也可以单独跑生成脚本（不用再跑 VBA 宏）
 
 材料平差表里本来要运行的宏（`CreateBianGengdan` / 广联达 / 神机导出）已全部改写成
 Python，**不用开宏、不用宏安全性**：
@@ -197,6 +215,8 @@ python bgd_toolkit.py db
 | 模板 | 只在运行时复制一份 `@变更单EXCEL模板` 工作表，**模板文件本身不动** |
 | 速度 | 套价数据库走 `xchange_cache.json`，加载约 10ms（原来每次要开 Excel 读 3.9MB 的 .xls） |
 | 等价性 | 与宏逐格比对：6 组变更单用例 + 4 组导出用例，全部 0 差异（含打印区域与分页符） |
+| 默认写回 | 结果直接写回原平差表（新增 sheet），不另建变更单 xls 文件 |
+| 独立导出 | 显式 `--standalone` 或 `export` 子命令才导出只含变更单的独立 xls |
 
 ### 命令速查
 
@@ -307,6 +327,7 @@ python fill_change_reason.py fill "变更单.xls" --body "你润色后的正文"
 | `scripts/material_reason.py` | 材料级推理引擎 |
 | `scripts/project_code.py` | 工程编号分类映射 |
 | `scripts/fill_change_reason.py` | 命令行入口 |
+| `scripts/gas_flow.py` | **统一入口**：DWG / 平差表自动判断从哪步开始，一路做到填好变更原因 |
 | `scripts/bgd_toolkit.py` | **生成变更单 / 广联达导入 / 神机导入**（替代材料平差表里的 VBA 宏） |
 | `scripts/xchange_db.py` | 套价数据库 JSON 缓存层（读取/重建/精简/定额查询） |
 | `scripts/xchange_cache.json` | 套价数据库缓存（替换规则 253 条 / 定额 5069 行 / 分隔符 20 条） |

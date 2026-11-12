@@ -633,7 +633,9 @@ def _builtin_update(args):
 
         # 校验必需文件
         for must in ("SKILL.md", "scripts/gas_change_core.py",
-                     "scripts/material_reason.py", "scripts/fill_change_reason.py"):
+                     "scripts/material_reason.py", "scripts/fill_change_reason.py",
+                     "scripts/bgd_toolkit.py", "scripts/gas_flow.py",
+                     "scripts/xchange_db.py", "scripts/xchange_cache.json"):
             if not os.path.exists(os.path.join(new_dir, must.replace("/", os.sep))):
                 print("[ERROR] 新版本缺少必需文件 %s，更新中止" % must)
                 return 2
