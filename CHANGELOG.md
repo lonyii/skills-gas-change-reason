@@ -5,6 +5,16 @@
 
 ---
 
+## 未发布
+
+- **更正关联技能引用（套价能力剥离）**：`nanchang-gas-settlement` 中的「套价 / 单价库 / 套价脚本」
+  已剥离到独立技能 `nanchang-gas-pricing`（<https://github.com/lonyii/skills-nanchang-gas-pricing>，
+  覆盖材料平差转广联达导入、单价匹配、NCS 导入表、变更预算/签证预算等套价能力），
+  `nanchang-gas-settlement` 仅保留结算规定查询与网页/AI 直接编辑。
+  `SKILL.md`「只要变更预算时跳过本技能」硬规则中的组价指引由 `nanchang-gas-settlement` 改为 `nanchang-gas-pricing`。
+
+---
+
 ## 1.5.2 —— 2026-11-16
 
 ### 变更
